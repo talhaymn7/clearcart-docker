@@ -37,6 +37,25 @@ services:
       - "7860"
     restart: unless-stopped
 
+  ad-b:
+    build: ./ad-b
+    container_name: clearcart-admin-backend
+    depends_on:
+      - postgres
+    volumes:
+      - ./ad-b/product-photos
+    environment:
+      - NODE_ENV=production
+      - DATABASE_URL=postgresql://postgres:REMOVED-DB-PASSWORD@postgres:5432/clearcart
+      - JWT_SECRET=REMOVED-JWT-SECRET
+      - JWT_PRIVATE_KEY_PATH=/app/keys/private.pem
+      - JWT_PUBLIC_KEY_PATH=/app/keys/public.pem
+      - CLIENT_KEYS_DIR=/app/keys/client_keys
+      - PORT=10031
+    expose:
+      - "10031"
+    restart: unless-stopped
+
    # 🚇 NGROK Tunnel (backend'e tünel açar)
   ngrok:
     image: ngrok/ngrok:latest
