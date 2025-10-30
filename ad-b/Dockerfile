@@ -66,6 +66,10 @@ RUN chmod +x start.sh build.sh \
 RUN apt-get purge -y --auto-remove build-essential \
  && rm -rf /var/lib/apt/lists/*
 
+RUN mkdir ad-b/keys
+RUN cd ad-b/keys
+RUN openssl genrsa -out private.pem 2048
+RUN openssl rsa -in private.pem -pubout -out public.pem
 # -----------------------------------------------------
 # 🚀 Uygulama başlatma
 # -----------------------------------------------------
