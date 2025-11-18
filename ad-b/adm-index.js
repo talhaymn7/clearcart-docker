@@ -170,7 +170,7 @@ app.post('/admin/change-password', async (req, res) => {
 /*
 ==== Alerjen listeleme
 */
-app.get('/admin/list-all-allergens', async (req, res) => {
+app.get('/admin/allergens/list-all-allergens', async (req, res) => {
   try {
     const { rows } = await pool.query(
       'SELECT id, name FROM allergens ORDER BY id ASC');
@@ -184,7 +184,7 @@ app.get('/admin/list-all-allergens', async (req, res) => {
 // ==============================================
 // 🔹 Alerjen Arama Endpoint
 // ==============================================
-app.get('/admin/search-allergens', async (req, res) => {
+app.get('/admin/allergens/search-allergens', async (req, res) => {
   try {
     const searchQuery = req.query.q || '';
     const likePattern = `%${searchQuery}%`;
@@ -206,7 +206,7 @@ app.get('/admin/search-allergens', async (req, res) => {
 /*
 ==== Alerjen Ekleme
 */
-app.post('/admin/add-allergen', async (req, res) => {
+app.post('/admin/allergens/add-allergen', async (req, res) => {
   try {
     const { name, description } = req.body;
     try {
@@ -225,6 +225,29 @@ app.post('/admin/add-allergen', async (req, res) => {
   }
 });
 
+app.get('/admin/allergens/:id/full-info', async (req,res) => {
+  const allergenId = req.params.id;
+  try{
+    const allergenIdQuery = 'SELECT a.name, a.description FROM allergens a WHERE a.id ($1)'
+    [allergenId];
+
+    const { rows: allergenRows } = pool.query(allergenIdQuery,[allergenId]);
+
+    if(allergenNames.length === 0){
+      return res.status(400).json({error: 'Alerjen bulunamadı.'});
+    }
+
+    return res.status(200).json({
+      id: allergenId,
+      name: allergenRows[0].name,
+      description: allergenRows[0].description,
+    })
+
+  }catch(e){
+    console.error('❌ Ürün alerjen kontrol hatası:', err);
+    return res.status(500).json({ error: 'Allergens-Full Info: Sunucu hatası' });
+  }
+});
 // Dosya yükleme ayarı (çoklu fotoğraf için)
 const productStorage = multer.diskStorage({
   destination: (req, file, cb) => {
@@ -263,7 +286,7 @@ app.post('/admin/add-product-without-photo', async (req, res) => {
 });
 
 
-app.post("/admin/add-product", uploadProductPhotos.array("photos", 10), async (req, res) => {
+app.post("/admin/add-product-with-photo", uploadProductPhotos.array("photos", 10), async (req, res) => {
   const client = await pool.connect();
   try {
     const { name, brand, description } = req.body;
