@@ -54,9 +54,17 @@ COPY . .
 RUN sed -i 's/\r$//' start.sh
 
 # -----------------------------------------------------
+# RSA Kayıtları oluşturma
+# -----------------------------------------------------
+RUN mkdir -p /app/keys /app/keys/client_keys
+RUN openssl genrsa -out /app/keys/private.pem 2048 && \
+    openssl rsa -in /app/keys/private.pem -out /app/keys/public.pem -pubout
+
+    RUN chmod 600 /app/keys/private.pem /app/keys/public.pem
+# -----------------------------------------------------
 # 🔐 İzinleri ve klasörleri ayarla
 # -----------------------------------------------------
-RUN chmod +x start.sh build.sh \
+RUN chmod +x start.sh \
  && mkdir -p /app/product-photos \
  && chmod -R 777 /app/product-photos
 
@@ -66,7 +74,7 @@ RUN chmod +x start.sh build.sh \
 RUN apt-get purge -y --auto-remove build-essential \
  && rm -rf /var/lib/apt/lists/*
 
-RUN mkdir ad-b/keys
+RUN mkdir -p ad-b/keys
 RUN cd ad-b/keys
 RUN openssl genrsa -out private.pem 2048
 RUN openssl rsa -in private.pem -pubout -out public.pem

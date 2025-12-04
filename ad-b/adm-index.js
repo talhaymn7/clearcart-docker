@@ -28,8 +28,29 @@ if (!fs.existsSync(productPhotoUploadsDir)) {
 
 app.use(express.json());
 
+function authenticateAdmin(req, res, next) {
+  // 1. Nginx 'Authorization' başlığını kullandığı için biz 'x-auth-token' kullanıyoruz
+  const token = req.headers['x-auth-token'];
+
+  if (!token) {
+    // Token yoksa içeri alma
+    return res.status(401).json({ error: 'Erişim reddedildi. Token eksik.' });
+  }
+
+  try {
+    // 2. Token'ı doğrula (verifyJWT fonksiyonun security.js'den geliyor)
+    const user = verifyJWT(token);
+    
+    // 3. Doğrulanan kullanıcıyı request'e ekle (change-password burayı kullanır)
+    req.user = user;
+    
+    next(); // Devam et
+  } catch (err) {
+    return res.status(403).json({ error: 'Geçersiz Token.' });
+  }
+}
 // Checking Connection 
-app.get('/ad-connection', (req, res) => {
+app.get('/admin/ad-connection', authenticateAdmin, (req, res) => {
   res.status(200).json({
     status: 'ok',
     message: 'ClearCart Admin Backend is working!'
@@ -39,11 +60,11 @@ app.get('/ad-connection', (req, res) => {
 /*
 ==== Server Public Key'ini Paylaşma Fonksiyonu
 */
-app.get('/auth/public-key', (_req, res) => {
+app.get('/admin/auth/public-key', authenticateAdmin, (_req, res) => {
   res.type('text/plain').send(SERVER_PUBLIC_KEY);
 });
 
-app.use('/product-photos', express.static(path.join(__dirname, 'product-photos')));
+app.use('/admin/product-photos', express.static(path.join(__dirname, 'product-photos')));
 
 /*
 ==== Database Bağlantısı
@@ -65,10 +86,12 @@ async function arePassordsMatch(enteredPassword, dbPassword) {
   return await bcyrpt.compare(enteredPassword, dbPassword);
 }
 
+
+
 /*
 ===== Register Endpointi
 */
-app.post('/admin/login', async (req, res) => {
+app.post('/admin/login', authenticateAdmin, async(req, res) => {
   try {
     const { email, password } = req.body;
 
@@ -92,7 +115,8 @@ app.post('/admin/login', async (req, res) => {
     }
 
     const token = signJWT({ email, id: user.id }, { expiresIn: '1d' });
-
+    const isJWTtrue = verifyJWT(token);
+    if(isJWTtrue){
     await pool.query(
       'UPDATE adm_users SET jwt_token = $1 WHERE id = $2',
       [token, user.id]
@@ -103,6 +127,7 @@ app.post('/admin/login', async (req, res) => {
       jwt: token,
     });
   }
+}
   catch (e) {
     console.error('❌ Login Hatası:', e);
     return res.status(500).json({ error: 'Sunucu hatası yaşandı. Daha fazla bilgi için logları kontrol edin.' });
@@ -112,7 +137,7 @@ app.post('/admin/login', async (req, res) => {
 /*
 ==== Changing Password Endpoint
 */
-app.post('/admin/change-password', async (req, res) => {
+app.post('/admin/change-password', authenticateAdmin, async (req, res) => {
   try {
     const { current_password, new_password } = req.body;
 
@@ -170,7 +195,7 @@ app.post('/admin/change-password', async (req, res) => {
 /*
 ==== Alerjen listeleme
 */
-app.get('/admin/allergens/list-all-allergens', async (req, res) => {
+app.get('/admin/allergens/list-all-allergens',authenticateAdmin, async (req, res) => {
   try {
     const { rows } = await pool.query(
       'SELECT id, name FROM allergens ORDER BY id ASC');
@@ -184,7 +209,7 @@ app.get('/admin/allergens/list-all-allergens', async (req, res) => {
 // ==============================================
 // 🔹 Alerjen Arama Endpoint
 // ==============================================
-app.get('/admin/allergens/search-allergens', async (req, res) => {
+app.get('/admin/allergens/search-allergens',authenticateAdmin, async (req, res) => {
   try {
     const searchQuery = req.query.q || '';
     const likePattern = `%${searchQuery}%`;
@@ -206,7 +231,7 @@ app.get('/admin/allergens/search-allergens', async (req, res) => {
 /*
 ==== Alerjen Ekleme
 */
-app.post('/admin/allergens/add-allergen', async (req, res) => {
+app.post('/admin/allergens/add-allergen',authenticateAdmin, async (req, res) => {
   try {
     const { name, description } = req.body;
     try {
@@ -225,7 +250,7 @@ app.post('/admin/allergens/add-allergen', async (req, res) => {
   }
 });
 
-app.get('/admin/allergens/:id/full-info', async (req,res) => {
+app.get('/admin/allergens/:id/full-info',authenticateAdmin, async (req,res) => {
   const allergenId = req.params.id;
   try{
     const allergenIdQuery = 'SELECT a.name, a.description FROM allergens a WHERE a.id ($1)'
@@ -270,7 +295,7 @@ const uploadProductPhotos = multer({
   limits: { files: 10 }, // max 10 foto
 });
 
-app.post('/admin/add-product-without-photo', async (req, res) => {
+app.post('/admin/add-product-without-photo', authenticateAdmin, async (req, res) => {
 
   const { name, brand, description } = req.body;
   try {
@@ -286,7 +311,7 @@ app.post('/admin/add-product-without-photo', async (req, res) => {
 });
 
 
-app.post("/admin/add-product-with-photo", uploadProductPhotos.array("photos", 10), async (req, res) => {
+app.post('/admin/add-product-with-photo', authenticateAdmin, uploadProductPhotos.array("photos", 10), async (req, res) => {
   const client = await pool.connect();
   try {
     const { name, brand, description } = req.body;
@@ -376,3 +401,7 @@ app.post("/admin/add-product-with-photo", uploadProductPhotos.array("photos", 10
   }
 });
 
+
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`✅ Backend ${PORT} portunda ve 0.0.0.0 adresinde dinleniyor.`);
+});

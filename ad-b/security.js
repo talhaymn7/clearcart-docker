@@ -31,12 +31,12 @@ try {
 // -------------------------------
 // 🔸 JWT Functions (RS256)
 // -------------------------------
-export function signJwt(payload, expiresIn = '7d') {
+function signJwt(payload, expiresIn = '7d') {
   if (!privateKey) throw new Error('Private key not loaded');
   return jwt.sign(payload, privateKey, { algorithm: 'RS256', expiresIn });
 }
 
-export function verifyJwt(token) {
+function verifyJwt(token) {
   if (!publicKey) throw new Error('Public key not loaded');
   return jwt.verify(token, publicKey, { algorithms: ['RS256'] });
 }
@@ -95,3 +95,8 @@ export function getPublicKey() {
   if (!publicKey) throw new Error('Public key not loaded');
   return publicKey;
 }
+
+export const SERVER_PUBLIC_KEY = publicKey;
+
+// Fonksiyonları büyük harfle JWT kullanan isimlerle yeniden dışa aktar
+export { signJwt as signJWT, verifyJwt as verifyJWT };
