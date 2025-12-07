@@ -116,6 +116,14 @@ async function arePassordsMatch(enteredPassword, dbPassword) {
 // 🚀 ENDPOINTS (Hepsi /admin/v1/ ile başlar)
 // ==================================================================
 
+
+app.use((req, res, next) => {
+  console.log(`📡 GELEN İSTEK: ${req.method} ${req.url}`);
+  next();
+});
+
+
+
 // 1️⃣ Bağlantı Kontrolü
 app.get('/admin/v1/ad-connection', authenticateAdmin, (req, res) => {
   res.status(200).json({
@@ -155,7 +163,7 @@ app.post('/admin/v1/login', async (req, res) => {
 
     // Kullanıcı yoksa
     if (!user) {
-      await logAdminAction(req, 'LOGIN_FAILED', 'Kullanıcı bulunamadı.');
+      await logAdminAction(req, 'LOGIN_FAILED', 'Kullanıcı bulunamadı: ' + email);
       return res.status(404).json({ error: 'Kullanıcı bulunamadı.' });
     }
 
@@ -167,7 +175,7 @@ app.post('/admin/v1/login', async (req, res) => {
     }
 
     // Token oluştur
-    const token = signJWT({ email, id: user.id }, { expiresIn: '1d' });
+    const token = signJWT({ email, id: user.id }, '1d');
     const isJWTtrue = verifyJWT(token);
 
     if (isJWTtrue) {
@@ -229,7 +237,7 @@ app.post('/admin/v1/change-password', authenticateAdmin, async (req, res) => {
     await pool.query('UPDATE adm_users SET password = $1 WHERE email = $2', [hashedPassword, email]);
 
     // Güvenlik için token'ı yenile
-    const newToken = signJWT({ email, id: user.id }, { expiresIn: '7d' });
+    const newToken = signJWT({ email, id: user.id }, '7d');
     await pool.query('UPDATE adm_users SET jwt_token = $1 WHERE email = $2', [newToken, email]);
 
     await logAdminAction(req, 'RESET_PASSWORD', 'Şifre değiştirildi.');
@@ -353,6 +361,21 @@ const uploadProductPhotos = multer({
   storage: productStorage,
   limits: { files: 10 }, // Maksimum 10 fotoğraf
 });
+
+app.get('/admin/v1/products/list-products', authenticateAdmin, async (req,res) => {
+  try{
+    const {rows} = await pool.query(
+      'SELECT * FROM products ORDER BY id DESC');
+
+      await logAdminAction(req,'LIST PRODUCTS',`Toplam ${rows.length} ürün listelendi.`);
+
+      return res.status(200).json({ products: rows});
+  } catch(e) {
+      await logAdminAction(req, 'LIST PRODUCTS ERROR', `List Productsta hata oluştu: ${e.message}`);
+      return res.status(500).json({error: 'Ürün yüklenirken sunucu hatası oluştu.'});
+  }
+});
+
 
 // Fotoğrafsız Ürün Ekleme
 app.post('/admin/v1/products/add-without-photo', authenticateAdmin, async (req, res) => {
