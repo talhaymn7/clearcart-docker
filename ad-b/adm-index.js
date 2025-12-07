@@ -137,7 +137,7 @@ app.use('/admin/v1/product-photos', express.static(path.join(__dirname, 'product
 /*
    👤 GİRİŞ İŞLEMLERİ (Login)
 */
-app.post('/admin/v1/login', authenticateAdmin, async (req, res) => {
+app.post('/admin/v1/login', async (req, res) => {
   try {
     const { email, password } = req.body;
 
