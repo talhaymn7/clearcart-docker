@@ -362,17 +362,17 @@ const uploadProductPhotos = multer({
   limits: { files: 10 }, // Maksimum 10 fotoğraf
 });
 
-app.get('/admin/v1/products/list-products', authenticateAdmin, async (req,res) => {
-  try{
-    const {rows} = await pool.query(
+app.get('/admin/v1/products/list-products', authenticateAdmin, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
       'SELECT * FROM products ORDER BY id DESC');
 
-      await logAdminAction(req,'LIST PRODUCTS',`Toplam ${rows.length} ürün listelendi.`);
+    await logAdminAction(req, 'LIST PRODUCTS', `Toplam ${rows.length} ürün listelendi.`);
 
-      return res.status(200).json({ products: rows});
-  } catch(e) {
-      await logAdminAction(req, 'LIST PRODUCTS ERROR', `List Productsta hata oluştu: ${e.message}`);
-      return res.status(500).json({error: 'Ürün yüklenirken sunucu hatası oluştu.'});
+    return res.status(200).json({ products: rows });
+  } catch (e) {
+    await logAdminAction(req, 'LIST PRODUCTS ERROR', `List Productsta hata oluştu: ${e.message}`);
+    return res.status(500).json({ error: 'Ürün yüklenirken sunucu hatası oluştu.' });
   }
 });
 
@@ -472,7 +472,7 @@ app.post('/admin/v1/products/add-with-photo', authenticateAdmin, uploadProductPh
 
       await client.query(
         `UPDATE products
-         SET embedding=$1, mean_rgb=$2, histogram=$3
+         SET image_embedding=$1, mean_rgb=$2, histogram=$3
          WHERE id=$4`,
         [avgEmbedding, avgRGB, avgHist, newId]
       );
@@ -492,6 +492,168 @@ app.post('/admin/v1/products/add-with-photo', authenticateAdmin, uploadProductPh
     res.status(500).json({ error: "Ürün ekleme sırasında bir hata oluştu." });
   } finally {
     // Bağlantıyı havuza geri bırak
+    client.release();
+  }
+});
+
+// 🔍 Tek Ürün Detayı Getir
+app.get('/admin/v1/products/:id/view', authenticateAdmin, async (req, res) => {
+  const productId = req.params.id;
+
+  try {
+    // Ürünü ID'ye göre bul
+    const { rows } = await pool.query(
+      'SELECT id, name, brand, description, barcode FROM products WHERE id = $1',
+      [productId]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'Ürün bulunamadı.' });
+    }
+
+    await logAdminAction(req, 'GET_PRODUCT_DETAIL', `Ürün incelendi ID: ${productId}`);
+
+    return res.status(200).json(rows[0]);
+  } catch (e) {
+    console.error('❌ Ürün detay hatası:', e);
+    await logAdminAction(req, 'GET_PRODUCT_DETAIL_ERROR', e.message);
+    return res.status(500).json({ error: 'Sunucu hatası.' });
+  }
+});
+
+// ✏️ Ürün Güncelleme (PUT İsteği)
+// DİKKAT: app.get değil, app.put kullanıyoruz!
+app.put('/admin/v1/products/:id/edit', authenticateAdmin, async (req, res) => {
+  const productId = req.params.id;
+  // Flutter'dan gelen yeni verileri alıyoruz
+  const { name, brand, description, barcode } = req.body;
+
+  try {
+    // 1. Önce ürün var mı diye kontrol edelim
+    const check = await pool.query('SELECT id FROM products WHERE id = $1', [productId]);
+
+    if (check.rows.length === 0) {
+      return res.status(404).json({ error: 'Düzenlenecek ürün bulunamadı.' });
+    }
+
+    // 2. Veritabanında güncelleme (UPDATE) yapalım
+    // Eğer null gelirse eski veriyi koru mantığı (COALESCE) veya direkt atama yapılabilir.
+    // Burada direkt atama yapıyoruz, Flutter tarafında boşsa null gönderdiğimiz için sorun olmaz.
+    await pool.query(
+      'UPDATE products SET name = $1, brand = $2, description = $3, barcode = $4 WHERE id = $5',
+      [name, brand, description, barcode, productId]
+    );
+
+    // 3. Loglama
+    await logAdminAction(req, 'UPDATE_PRODUCT', `Ürün güncellendi ID: ${productId}`);
+
+    return res.status(200).json({ message: 'Ürün başarıyla güncellendi.' });
+  } catch (e) {
+    console.error('❌ Ürün güncelleme hatası:', e);
+    await logAdminAction(req, 'UPDATE_PRODUCT_ERROR', e.message);
+    return res.status(500).json({ error: 'Sunucu hatası.' });
+  }
+});
+
+// 📸✏️ FOTOĞRAFLI Ürün Güncelleme (AI Analizi Dahil)
+app.put('/admin/v1/products/:id/update-with-photo', authenticateAdmin, uploadProductPhotos.array("photos", 10), async (req, res) => {
+  const client = await pool.connect(); // Transaction başlat
+  const productId = req.params.id;
+  const { name, brand, description, barcode } = req.body;
+  const photos = req.files;
+
+  console.log(`📸 FOTOĞRAFLI GÜNCELLEME: ID=${productId}, Foto Sayısı=${photos.length}`);
+
+  try {
+    // 1️⃣ Önce Metin Bilgilerini Güncelle
+    await client.query(
+      'UPDATE products SET name = $1, brand = $2, description = $3, barcode = $4 WHERE id = $5',
+      [name, brand, description, barcode || null, productId]
+    );
+
+    // Fotoğraf yoksa sadece metni güncellemiş olduk
+    if (!photos || photos.length === 0) {
+      client.release();
+      return res.status(200).json({ message: 'Metin bilgileri güncellendi, fotoğraf yoktu.' });
+    }
+
+    // 2️⃣ Fotoğrafları İşle (Rename & Move)
+    const photoPaths = [];
+    for (const file of photos) {
+      const ext = path.extname(file.originalname);
+      const randomSuffix = Math.floor(Math.random() * 10000);
+      const newFileName = `${productId}_${randomSuffix}${ext}`; // Mevcut ID'yi kullan
+      const newPath = path.join(__dirname, "product-photos", newFileName);
+
+      fs.renameSync(file.path, newPath);
+      photoPaths.push(newPath);
+    }
+
+    // 3️⃣ AI Scriptini Çalıştır (Embedding & Renk Analizi)
+    const runPython = (imgPath) => {
+      return new Promise((resolve, reject) => {
+        execFile("python3", ["cc-ai.py", imgPath], (error, stdout, stderr) => {
+          if (error) return reject(stderr);
+          try {
+            resolve(JSON.parse(stdout));
+          } catch (err) {
+            reject(err);
+          }
+        });
+      });
+    };
+
+    const embeddingResults = [];
+    for (const imgPath of photoPaths) {
+      try {
+        const result = await runPython(imgPath);
+        // Eğer AI yeni bir barkod bulduysa ve mevcut barkod boşsa güncelle
+        if (result.barcode && (!barcode || barcode === "")) {
+          await client.query("UPDATE products SET barcode=$1 WHERE id=$2", [result.barcode, productId]);
+        }
+        // Görsel verilerini topla
+        if (result.image_embedding) {
+          embeddingResults.push(result);
+        }
+      } catch (err) {
+        console.error(`AI İşleme Hatası (${imgPath}):`, err);
+      }
+    }
+
+    // 4️⃣ Ortalamaları Al ve Veritabanına Yaz
+    if (embeddingResults.length > 0) {
+      const avg = (arrays) =>
+        arrays[0].map((_, i) => arrays.reduce((sum, arr) => sum + arr[i], 0) / arrays.length);
+
+      const avgEmbedding = avg(embeddingResults.map((r) => r.image_embedding));
+      const avgRGB = avg(embeddingResults.map((r) => r.mean_rgb));
+      const avgHist = avg(embeddingResults.map((r) => r.histogram));
+
+      // 🛠 DÜZELTME BURADA:
+      await client.query(
+        `UPDATE products
+         SET image_embedding = $1::vector, 
+             mean_rgb = $2, 
+             histogram = $3
+         WHERE id = $4`,
+        [
+          JSON.stringify(avgEmbedding), // Array'i string'e çevir: "[...]"
+          avgRGB,                       // ❌ JSON.stringify YOK! (Doğrudan array gönderin)
+          avgHist,                      // ❌ JSON.stringify YOK! (Doğrudan array gönderin)
+          productId
+        ]
+      );
+    }
+
+    await logAdminAction(req, 'UPDATE_PRODUCT_WITH_PHOTO', `ID: ${productId} güncellendi ve analiz edildi.`);
+
+    res.status(200).json({ message: 'Ürün ve AI analizi başarıyla güncellendi.' });
+
+  } catch (e) {
+    console.error('❌ Fotoğraflı güncelleme hatası:', e);
+    await logAdminAction(req, 'UPDATE_WITH_PHOTO_ERROR', e.message);
+    res.status(500).json({ error: 'Sunucu hatası oluştu.' });
+  } finally {
     client.release();
   }
 });
