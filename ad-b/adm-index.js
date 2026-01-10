@@ -382,8 +382,8 @@ app.post('/admin/v1/products/add-without-photo', authenticateAdmin, async (req, 
   const { name, brand, description } = req.body;
   try {
     await pool.query(
-      'INSERT INTO products (name,brand,description) VALUES ($1,$2,$3)',
-      [name, brand, description]
+      'INSERT INTO products (name,brand,description,scan_count) VALUES ($1,$2,$3,$4)',
+      [name, brand, description, 0]
     );
 
     await logAdminAction(req, 'ADD_PRODUCT_NO_PHOTO', `Ürün: ${name}`);
@@ -415,8 +415,8 @@ app.post('/admin/v1/products/add-with-photo', authenticateAdmin, uploadProductPh
 
     // 2️⃣ Ürünü veritabanına ekle
     await client.query(
-      "INSERT INTO products (id, name, brand, description) VALUES ($1, $2, $3, $4)",
-      [newId, name, brand, description]
+      "INSERT INTO products (id, name, brand, description,scan_count) VALUES ($1, $2, $3, $4, $5)",
+      [newId, name, brand, description,0]
     );
 
     // 3️⃣ Fotoğrafları doğru ID ile yeniden adlandır
@@ -657,6 +657,95 @@ app.put('/admin/v1/products/:id/update-with-photo', authenticateAdmin, uploadPro
     client.release();
   }
 });
+
+// ==========================================
+// 🗑️ ÜRÜN SİLME (DELETE)
+// ==========================================
+app.delete('/admin/v1/products/:id/delete', authenticateAdmin, async (req, res) => {
+  const productId = req.params.id;
+
+  try {
+    // 1. Ürün var mı kontrol et
+    const check = await pool.query('SELECT id FROM products WHERE id = $1', [productId]);
+    if (check.rows.length === 0) {
+      return res.status(404).json({ error: 'Silinecek ürün bulunamadı.' });
+    }
+
+    // 2. Ürünü sil
+    await pool.query('DELETE FROM products WHERE id = $1', [productId]);
+
+    // 3. Logla
+    await logAdminAction(req, 'DELETE_PRODUCT', `Ürün silindi ID: ${productId}`);
+
+    return res.status(200).json({ message: 'Ürün başarıyla silindi.' });
+  } catch (e) {
+    console.error('❌ Ürün silme hatası:', e);
+    await logAdminAction(req, 'DELETE_PRODUCT_ERROR', e.message);
+    return res.status(500).json({ error: 'Sunucu hatası.' });
+  }
+});
+
+// ==========================================
+// 📨 FEEDBACK LİSTELEME (READ)
+// ==========================================
+app.get('/admin/v1/feedbacks/list', authenticateAdmin, async (req, res) => {
+  try {
+    // user_feedback tablosundan verileri çekiyoruz.
+    // Eğer 'default_users' tablosu ile join yapmak istersen sorguyu değiştirebiliriz.
+    // Şimdilik doğrudan mesajları alalım.
+    const { rows } = await pool.query(
+      'SELECT id, user_id, subject, message, image_url, created_at FROM user_feedback ORDER BY created_at DESC'
+    );
+
+    await logAdminAction(req, 'LIST_FEEDBACK', `Toplam ${rows.length} bildirim listelendi.`);
+    return res.status(200).json({ feedbacks: rows });
+  } catch (e) {
+    console.error('❌ Feedback listeleme hatası:', e);
+    await logAdminAction(req, 'LIST_FEEDBACK_ERROR', e.message);
+    return res.status(500).json({ error: 'Sunucu hatası.' });
+  }
+});
+
+// ==========================================
+// 📊 DASHBOARD İSTATİSTİKLERİ
+// ==========================================
+app.get('/admin/v1/dashboard/stats', authenticateAdmin, async (req, res) => {
+  try {
+    // 1. Toplam Ürün Sayısı
+    const productCountRes = await pool.query('SELECT COUNT(*) FROM products');
+    const totalProducts = parseInt(productCountRes.rows[0].count);
+
+    // 2. Toplam Feedback Sayısı
+    const feedbackCountRes = await pool.query('SELECT COUNT(*) FROM user_feedback');
+    const totalFeedback = parseInt(feedbackCountRes.rows[0].count);
+
+    // 3. En Çok Tarananlar (Şimdilik ürünleri ID sırasına göre 5 tane alalım, 
+    // 1. Sorguya scan_count'u da dahil ediyoruz
+    const recentProductsRes = await pool.query(
+      'SELECT name, scan_count FROM products ORDER BY scan_count DESC LIMIT 5'
+    );
+
+    // 2. Formatı Flutter'a uygun hale getiriyoruz (Gerçek veriyi kullanarak)
+    const mostScanned = recentProductsRes.rows.map(p => ({
+      name: p.name,
+      count: p.scan_count || 0 // Eğer scan_count NULL ise 0 döndürür
+    }));
+
+    // Test için console log
+    console.log('📊 En çok taranan ürünler:', mostScanned);
+
+    return res.status(200).json({
+      total_products: totalProducts,
+      total_feedback: totalFeedback,
+      most_scanned: mostScanned
+    });
+
+  } catch (e) {
+    console.error('❌ Dashboard stats hatası:', e);
+    return res.status(500).json({ error: 'İstatistikler alınamadı.' });
+  }
+});
+
 
 // Sunucuyu Dinle
 app.listen(PORT, '0.0.0.0', () => {

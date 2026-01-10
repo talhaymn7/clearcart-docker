@@ -140,7 +140,7 @@ app.post('/register', async (req, res) => {
     console.log(`🔐 RSA anahtar çifti oluşturuldu: user=${userId}`);
 
     // 5️⃣ Kullanıcı JWT oluştur
-    const token = signJWT({ email, id: userId }, { expiresIn: '7d' });
+    const token = signJWT({ email, id: userId }, '7d' );
 
     // 6️⃣ Token’ı DB’ye yaz
     await pool.query('UPDATE default_users SET jwt_token = $1 WHERE id = $2', [token, userId]);
@@ -202,7 +202,7 @@ app.post('/login', async (req, res) => {
     }
 
     // 6️⃣ Token oluştur
-    const token = signJWT({ email, id: user.id }, { expiresIn: '7d' });
+    const token = signJWT({ email, id: user.id }, '7d' );
 
 
     // 7️⃣ Veritabanında token güncelle
@@ -282,7 +282,7 @@ app.post('/change-password', authenticateToken, async (req, res) => {
     ]);
 
     // 8️⃣ Yeni JWT oluştur
-    const newToken = signJWT({ email, id: user.id }, { expiresIn: '7d' });
+    const newToken = signJWT({ email, id: user.id },  '7d' );
 
 
     // 9️⃣ Token’ı güncelle
@@ -363,7 +363,7 @@ app.patch('/refresh-token', authenticateToken, async (req, res) => {
     const user = rows[0];
     const id = user.id;
     // 2️⃣ Yeni JWT oluştur
-    const newToken = signJWT({ email, id }, { expiresIn: '7d' });
+    const newToken = signJWT({ email, id }, '7d');
 
 
     // 3️⃣ Veritabanında jwt_token alanını güncelle
@@ -473,7 +473,7 @@ app.post('/auth/google', async (req, res) => {
       const userId = inserted[0].id;
 
       // Şimdi id + email içeren JWT oluştur
-      const token = signJWT({ id: userId, email }, { expiresIn: '7d' });
+      const token = signJWT({ id: userId, email });
 
       // Token’ı DB’ye kaydet
       await pool.query('UPDATE default_users SET jwt_token = $1 WHERE id = $2', [token, userId]);
@@ -488,7 +488,7 @@ app.post('/auth/google', async (req, res) => {
     }
 
     // 4️⃣ Kullanıcı varsa → yeni token üret ve güncelle
-    const newToken = signJWT({ id: user.id, email }, { expiresIn: '7d' });
+    const newToken = signJWT({ id: user.id, email });
 
     await pool.query('UPDATE default_users SET jwt_token = $1 WHERE id = $2', [
       newToken,
@@ -506,8 +506,8 @@ app.post('/auth/google', async (req, res) => {
       needs_profile: !hasProfile,
     });
   } catch (err) {
-    console.error('❌ Google token doğrulama hatası:', err);
-    return res.status(401).json({ error: 'Geçersiz Google token' });
+    console.error('❌ Detaylı Google Giriş Hatası:', err.message); 
+    return res.status(401).json({ error: 'Giriş işlemi başarısız', details: err.message });
   }
 });
 
@@ -765,14 +765,18 @@ app.post('/products/image-search', authenticateToken, upload.single('image'), as
       console.log('🟢 PostgreSQL fonksiyon sonucu:', rows);
 
       if (rows && rows.length > 0) {
+        const matchedProductId = rows[0].id;
+
+        // 🚀 Arka planda sayacı artır (await ile beklemene gerek yok, kullanıcıyı bekletme)
+        pool.query('UPDATE products SET scan_count = scan_count + 1 WHERE id = $1', [matchedProductId])
+          .catch(err => console.error('❌ scan_count güncellenirken hata:', err));
+
         return res.json({
           found: true,
           bestMatch: {
-            id: rows[0].id,
+            id: matchedProductId,
             brand: rows[0].brand,
-            name: rows[0].name,
-            description: rows[0].description,
-            barcode: rows[0].barcode,
+            // ... diğer alanlar
             score: rows[0].similarity_score,
           },
         });
@@ -851,86 +855,6 @@ app.get('/products/:id/full-info', authenticateToken, async (req, res) => {
   } catch (err) {
     console.error('❌ Ürün alerjen kontrol hatası:', err);
     return res.status(500).json({ error: 'Sunucu hatası' });
-  }
-});
-
-// ==============================================
-// 🔹 Feedback Gönderme Endpoint
-// ==============================================
-app.post('/submit-feedback', authenticateToken, async (req, res) => {
-  try {
-    const email = req.user.email;
-    const { message, product_id, image_base64, matched_product } = req.body;
-
-    // 1️⃣ Temel kontrol
-    if (!message) {
-      return res.status(400).json({ error: 'Mesaj zorunlu.' });
-    }
-
-    // 2️⃣ Kullanıcı ID'sini al
-    const { rows: userRows } = await pool.query(
-      'SELECT id FROM default_users WHERE email = $1 LIMIT 1',
-      [email]
-    );
-
-    if (userRows.length === 0) {
-      return res.status(404).json({ error: 'Kullanıcı bulunamadı.' });
-    }
-
-    const user_id = userRows[0].id;
-
-    // 3️⃣ Feedback verisini DB’ye kaydet (görsel olmadan)
-    const insertQuery = `
-      INSERT INTO feedbacks (user_id, product_id, message, matched_product, created_at, image_base64)
-      VALUES ($1, $2, $3, $4, $5, NULL)
-      RETURNING id;
-    `;
-    const { rows: inserted } = await pool.query(insertQuery, [
-      user_id,
-      product_id || null,
-      message,
-      matched_product || null,
-      new Date().toISOString(),
-    ]);
-
-    const feedback_id = inserted[0].id;
-    let savedImagePath = null;
-
-    // 4️⃣ Eğer görsel geldiyse kaydet
-    if (image_base64) {
-      const imageBuffer = Buffer.from(image_base64, 'base64');
-      const uploadsDir = path.join(__dirname, 'user_uploads', 'feedback');
-
-      if (!fs.existsSync(uploadsDir)) {
-        fs.mkdirSync(uploadsDir, { recursive: true });
-      }
-
-      savedImagePath = path.join(uploadsDir, `${feedback_id}.jpg`);
-      fs.writeFileSync(savedImagePath, imageBuffer);
-
-      // 5️⃣ Görsel yolunu DB’de güncelle
-      const updateQuery = `
-        UPDATE feedbacks 
-        SET image_base64 = $1 
-        WHERE id = $2;
-      `;
-      await pool.query(updateQuery, [
-        `/user_uploads/feedback/${feedback_id}.jpg`,
-        feedback_id,
-      ]);
-    }
-
-    // 6️⃣ Başarılı yanıt
-    console.log(`🟢 Feedback kaydedildi: ${email} (ID=${feedback_id})`);
-    return res.json({
-      success: true,
-      message: 'Geri bildirim kaydedildi ✅',
-      feedback_id,
-      image: savedImagePath ? `/${savedImagePath}` : null,
-    });
-  } catch (err) {
-    console.error('❌ Feedback kaydı hatası:', err);
-    return res.status(500).json({ error: 'Sunucu hatası', details: err.message });
   }
 });
 
