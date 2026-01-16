@@ -44,6 +44,7 @@ services:
       - postgres
     volumes:
     - ./ad-b/product-photos:/app/product-photos
+    - ./backend/user_uploads:/app/user_uploads
     environment:
       - NODE_ENV=production
       - DATABASE_URL=postgresql://postgres:REMOVED-DB-PASSWORD@postgres:5432/clearcart

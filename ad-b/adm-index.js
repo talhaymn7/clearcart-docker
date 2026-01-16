@@ -33,6 +33,22 @@ if (!fs.existsSync(productPhotoUploadsDir)) {
 // JSON verilerini işlemek için middleware
 app.use(express.json());
 
+app.use('/product-photos', (req, res, next) => {
+    console.log(`📸 FOTOĞRAF İSTEĞİ GELDİ: ${req.url}`);
+    const fullPath = path.join(__dirname, 'product-photos', req.url);
+    // Dosya var mı kontrol et (Debug için)
+    if (!fs.existsSync(fullPath)) {
+        console.error(`❌ DOSYA BULUNAMADI: ${fullPath}`);
+    }
+    next();
+});
+
+// 2. Dosyayı Sun
+app.use('/product-photos', express.static(path.join(__dirname, 'product-photos')));
+
+app.use('/user_uploads', express.static(path.join(__dirname, 'user_uploads')));
+
+
 // ==========================================
 // 🛡️ Middleware: Admin Kimlik Doğrulama
 // ==========================================
@@ -425,15 +441,19 @@ app.post('/admin/v1/products/add-without-photo', authenticateAdmin, async (req, 
 });
 
 // Fotoğraflı Ürün Ekleme ve AI İşleme (Embedding)
+// adm-index.js
+
 app.post('/admin/v1/products/add-with-photo', authenticateAdmin, uploadProductPhotos.array("photos", 10), async (req, res) => {
-  // Transaction (işlem bütünlüğü) için client alıyoruz
+  // Transaction ve devamlılık için client alıyoruz
   const client = await pool.connect();
 
   try {
     const { name, brand, description } = req.body;
     const photos = req.files;
 
-    if (!name || !brand || photos.length === 0) {
+    // Validasyon
+    if (!name || !brand || !photos || photos.length === 0) {
+      client.release(); // Hata varsa bağlantıyı hemen bırak
       return res.status(400).json({ error: "Eksik bilgi veya fotoğraf yüklenmedi." });
     }
 
@@ -441,10 +461,10 @@ app.post('/admin/v1/products/add-with-photo', authenticateAdmin, uploadProductPh
     const lastIdResult = await client.query("SELECT MAX(id) AS last_id FROM products");
     const newId = (lastIdResult.rows[0].last_id || 0) + 1;
 
-    // 2️⃣ Ürünü veritabanına ekle
+    // 2️⃣ Ürünü veritabanına ekle (Henüz embeddingler yok)
     await client.query(
-      "INSERT INTO products (id, name, brand, description,scan_count) VALUES ($1, $2, $3, $4, $5)",
-      [newId, name, brand, description,0]
+      "INSERT INTO products (id, name, brand, description, scan_count) VALUES ($1, $2, $3, $4, $5)",
+      [newId, name, brand, description, 0]
     );
 
     // 3️⃣ Fotoğrafları doğru ID ile yeniden adlandır
@@ -455,72 +475,100 @@ app.post('/admin/v1/products/add-with-photo', authenticateAdmin, uploadProductPh
       const newFileName = `${newId}_${randomSuffix}${ext}`;
       const newPath = path.join(__dirname, "product-photos", newFileName);
 
-      // Dosya ismini değiştir
       fs.renameSync(file.path, newPath);
       photoPaths.push(newPath);
     }
 
-    // 4️⃣ Python Scriptini Çağırma (Embedding için)
-    const runPython = (imgPath) => {
-      return new Promise((resolve, reject) => {
-        execFile("python3", ["cc-ai.py", imgPath], (error, stdout, stderr) => {
-          if (error) return reject(stderr);
-          try {
-            const output = JSON.parse(stdout);
-            resolve(output);
-          } catch (err) {
-            reject(err);
-          }
-        });
-      });
-    };
-
-    // 5️⃣ Tüm fotoğrafları Python ile işle
-    const embeddingResults = [];
-    for (const imgPath of photoPaths) {
-      const result = await runPython(imgPath);
-
-      // Eğer barkod bulduysa veritabanına kaydet
-      if (result.barcode) {
-        await client.query("UPDATE products SET barcode=$1 WHERE id=$2", [result.barcode, newId]);
-      } else {
-        // Barkod yoksa görsel verilerini (embedding) topla
-        embeddingResults.push(result);
-      }
-    }
-
-    // 6️⃣ Embeddinglerin Ortalamasını Al ve Kaydet
-    if (embeddingResults.length > 0) {
-      const avg = (arrays) =>
-        arrays[0].map((_, i) => arrays.reduce((sum, arr) => sum + arr[i], 0) / arrays.length);
-
-      const avgEmbedding = avg(embeddingResults.map((r) => r.image_embedding));
-      const avgRGB = avg(embeddingResults.map((r) => r.mean_rgb));
-      const avgHist = avg(embeddingResults.map((r) => r.histogram));
-
-      await client.query(
-        `UPDATE products
-         SET image_embedding=$1, mean_rgb=$2, histogram=$3
-         WHERE id=$4`,
-        [avgEmbedding, avgRGB, avgHist, newId]
-      );
-    }
-
     await logAdminAction(req, 'ADD_PRODUCT_WITH_PHOTO', `Ürün ID: ${newId} - Foto Sayısı: ${photos.length}`);
 
-    res.json({
-      message: "✅ Ürün başarıyla eklendi ve embedding işlendi.",
+    // 🔥 KRİTİK NOKTA: Cevabı hemen gönderiyoruz!
+    res.status(201).json({
+      message: "✅ Ürün oluşturuldu, AI analizi arka planda devam ediyor.",
       product_id: newId,
       photo_count: photoPaths.length,
     });
 
+    // =================================================================
+    // 🚀 ARKA PLAN İŞLEMLERİ (Fire & Forget)
+    // =================================================================
+    (async () => {
+      try {
+        console.log(`🤖 [Arka Plan] AI Analizi Başladı (Ürün ID: ${newId})...`);
+
+        // Python Çağırma Fonksiyonu
+        const runPython = (imgPath) => {
+          return new Promise((resolve, reject) => {
+            execFile("python3", ["cc-ai.py", imgPath], (error, stdout, stderr) => {
+              if (error) return reject(stderr);
+              try {
+                const output = JSON.parse(stdout);
+                resolve(output);
+              } catch (err) {
+                reject(err);
+              }
+            });
+          });
+        };
+
+        // 4️⃣ Tüm fotoğrafları Python ile işle
+        const embeddingResults = [];
+        for (const imgPath of photoPaths) {
+          try {
+            const result = await runPython(imgPath);
+
+            // Eğer barkod bulduysa veritabanına kaydet
+            if (result.barcode) {
+              await client.query("UPDATE products SET barcode=$1 WHERE id=$2", [result.barcode, newId]);
+            }
+            
+            // Görsel verilerini (embedding) topla
+            if(result.image_embedding) {
+               embeddingResults.push(result);
+            }
+          } catch (err) {
+             console.error(`⚠️ AI Hatası (${path.basename(imgPath)}):`, err);
+             // Tek bir resim hata verirse süreci durdurmuyoruz, diğerlerine geçiyoruz.
+          }
+        }
+
+        // 5️⃣ Embeddinglerin Ortalamasını Al ve Kaydet
+        if (embeddingResults.length > 0) {
+          const avg = (arrays) =>
+            arrays[0].map((_, i) => arrays.reduce((sum, arr) => sum + arr[i], 0) / arrays.length);
+
+          const avgEmbedding = avg(embeddingResults.map((r) => r.image_embedding));
+          const avgRGB = avg(embeddingResults.map((r) => r.mean_rgb));
+          const avgHist = avg(embeddingResults.map((r) => r.histogram));
+
+          await client.query(
+            `UPDATE products
+             SET image_embedding=$1::vector, mean_rgb=$2, histogram=$3
+             WHERE id=$4`,
+            [JSON.stringify(avgEmbedding), avgRGB, avgHist, newId]
+          );
+          
+          console.log(`✅ [Arka Plan] AI Analizi Tamamlandı (Ürün ID: ${newId})`);
+        } else {
+          console.log(`⚠️ [Arka Plan] Hiçbir resimden embedding üretilemedi (Ürün ID: ${newId})`);
+        }
+
+      } catch (bgError) {
+        console.error("❌ Arka plan işlem hatası:", bgError);
+      } finally {
+        // İşimiz bitince veya hata çıkınca client'ı havuza iade ediyoruz.
+        client.release();
+      }
+    })();
+
   } catch (err) {
-    await logAdminAction(req, 'ADD_PRODUCT_WITH_PHOTO_ERROR', err.message);
-    console.error("❌ Hata:", err);
-    res.status(500).json({ error: "Ürün ekleme sırasında bir hata oluştu." });
-  } finally {
-    // Bağlantıyı havuza geri bırak
-    client.release();
+    // Ana blokta hata olursa (Cevap gönderilmeden önce)
+    console.error("❌ Ürün ekleme hatası:", err);
+    
+    // Eğer cevap henüz gönderilmediyse hata dön
+    if (!res.headersSent) {
+      client.release(); // Client'ı burada bırakıyoruz çünkü arka plana hiç giremedik
+      res.status(500).json({ error: "Ürün ekleme sırasında bir hata oluştu." });
+    }
   }
 });
 
@@ -584,133 +632,106 @@ app.put('/admin/v1/products/:id/edit', authenticateAdmin, async (req, res) => {
 
 // 📸✏️ FOTOĞRAFLI Ürün Güncelleme (AI Analizi Dahil)
 app.put('/admin/v1/products/:id/update-with-photo', authenticateAdmin, uploadProductPhotos.array("photos", 10), async (req, res) => {
-  const client = await pool.connect(); // Transaction başlat
+  const client = await pool.connect(); 
   const productId = req.params.id;
   const { name, brand, description, barcode } = req.body;
   const photos = req.files;
 
-  console.log(`📸 FOTOĞRAFLI GÜNCELLEME: ID=${productId}, Foto Sayısı=${photos.length}`);
+  console.log(`📸 HIZLI YÜKLEME: ID=${productId}, Foto Sayısı=${photos ? photos.length : 0}`);
 
   try {
-    // 1️⃣ Önce Metin Bilgilerini Güncelle
+    // 1️⃣ Metin Bilgilerini Güncelle
     await client.query(
       'UPDATE products SET name = $1, brand = $2, description = $3, barcode = $4 WHERE id = $5',
       [name, brand, description, barcode || null, productId]
     );
 
-    // Fotoğraf yoksa sadece metni güncellemiş olduk
     if (!photos || photos.length === 0) {
       client.release();
-      return res.status(200).json({ message: 'Metin bilgileri güncellendi, fotoğraf yoktu.' });
+      return res.status(200).json({ message: 'Bilgiler güncellendi.' });
     }
 
-    // 2️⃣ Fotoğrafları İşle (Rename & Move)
+    // 2️⃣ Fotoğrafları Klasöre Taşı (Bu işlem çok hızlıdır)
     const photoPaths = [];
     for (const file of photos) {
       const ext = path.extname(file.originalname);
       const randomSuffix = Math.floor(Math.random() * 10000);
-      const newFileName = `${productId}_${randomSuffix}${ext}`; // Mevcut ID'yi kullan
+      const newFileName = `${productId}_${randomSuffix}${ext}`;
       const newPath = path.join(__dirname, "product-photos", newFileName);
 
       fs.renameSync(file.path, newPath);
       photoPaths.push(newPath);
     }
 
-    // 3️⃣ AI Scriptini Çalıştır (Embedding & Renk Analizi)
-    const runPython = (imgPath) => {
-      return new Promise((resolve, reject) => {
-        execFile("python3", ["cc-ai.py", imgPath], (error, stdout, stderr) => {
-          if (error) return reject(stderr);
-          try {
-            resolve(JSON.parse(stdout));
-          } catch (err) {
-            reject(err);
-          }
-        });
-      });
-    };
+    // 🔥 KRİTİK NOKTA: Kullanıcıyı bekletme, hemen cevap ver!
+    res.status(200).json({ 
+        message: 'Fotoğraflar yüklendi, AI analizi arka planda başlatıldı.',
+        uploaded_count: photoPaths.length
+    });
 
-    const embeddingResults = [];
-    for (const imgPath of photoPaths) {
-      try {
-        const result = await runPython(imgPath);
-        // Eğer AI yeni bir barkod bulduysa ve mevcut barkod boşsa güncelle
-        if (result.barcode && (!barcode || barcode === "")) {
-          await client.query("UPDATE products SET barcode=$1 WHERE id=$2", [result.barcode, productId]);
+    // 3️⃣ AI İşlemlerini ARKA PLANDA Yap (Kullanıcı cevabı aldıktan sonra burası çalışmaya devam eder)
+    // client.release() yapmıyoruz çünkü aşağıda kullanacağız.
+    // Ancak Express bağlantısı koptuğu için hata olursa loglara yazacağız.
+    
+    (async () => {
+        try {
+            console.log("🤖 AI Analizi arka planda başladı...");
+            const runPython = (imgPath) => {
+                return new Promise((resolve, reject) => {
+                    execFile("python3", ["cc-ai.py", imgPath], (error, stdout, stderr) => {
+                        if (error) return reject(stderr);
+                        try { resolve(JSON.parse(stdout)); } catch (err) { reject(err); }
+                    });
+                });
+            };
+
+            const embeddingResults = [];
+            for (const imgPath of photoPaths) {
+                try {
+                    const result = await runPython(imgPath);
+                    // Eğer yeni barkod bulursa güncelle
+                    if (result.barcode) {
+                        await client.query("UPDATE products SET barcode=$1 WHERE id=$2 AND (barcode IS NULL OR barcode = '')", [result.barcode, productId]);
+                    }
+                    if (result.image_embedding) embeddingResults.push(result);
+                } catch (err) {
+                    console.error(`⚠️ AI Arkaplan Hatası (${path.basename(imgPath)}):`, err);
+                }
+            }
+
+            // Ortalamaları hesapla ve kaydet
+            if (embeddingResults.length > 0) {
+                const avg = (arrays) => arrays[0].map((_, i) => arrays.reduce((sum, arr) => sum + arr[i], 0) / arrays.length);
+                
+                await client.query(
+                    `UPDATE products SET image_embedding = $1::vector, mean_rgb = $2, histogram = $3 WHERE id = $4`,
+                    [
+                        JSON.stringify(avg(embeddingResults.map((r) => r.image_embedding))),
+                        avg(embeddingResults.map((r) => r.mean_rgb)),
+                        avg(embeddingResults.map((r) => r.histogram)),
+                        productId
+                    ]
+                );
+                console.log("✅ AI Analizi ve Veritabanı güncellemesi tamamlandı.");
+            }
+        } catch (backgroundError) {
+            console.error("❌ Arka plan işlem hatası:", backgroundError);
+        } finally {
+            client.release(); // Bağlantıyı işimiz bitince bırakıyoruz
         }
-        // Görsel verilerini topla
-        if (result.image_embedding) {
-          embeddingResults.push(result);
-        }
-      } catch (err) {
-        console.error(`AI İşleme Hatası (${imgPath}):`, err);
-      }
-    }
-
-    // 4️⃣ Ortalamaları Al ve Veritabanına Yaz
-    if (embeddingResults.length > 0) {
-      const avg = (arrays) =>
-        arrays[0].map((_, i) => arrays.reduce((sum, arr) => sum + arr[i], 0) / arrays.length);
-
-      const avgEmbedding = avg(embeddingResults.map((r) => r.image_embedding));
-      const avgRGB = avg(embeddingResults.map((r) => r.mean_rgb));
-      const avgHist = avg(embeddingResults.map((r) => r.histogram));
-
-      // 🛠 DÜZELTME BURADA:
-      await client.query(
-        `UPDATE products
-         SET image_embedding = $1::vector, 
-             mean_rgb = $2, 
-             histogram = $3
-         WHERE id = $4`,
-        [
-          JSON.stringify(avgEmbedding), // Array'i string'e çevir: "[...]"
-          avgRGB,                       // ❌ JSON.stringify YOK! (Doğrudan array gönderin)
-          avgHist,                      // ❌ JSON.stringify YOK! (Doğrudan array gönderin)
-          productId
-        ]
-      );
-    }
-
-    await logAdminAction(req, 'UPDATE_PRODUCT_WITH_PHOTO', `ID: ${productId} güncellendi ve analiz edildi.`);
-
-    res.status(200).json({ message: 'Ürün ve AI analizi başarıyla güncellendi.' });
+    })();
 
   } catch (e) {
-    console.error('❌ Fotoğraflı güncelleme hatası:', e);
-    await logAdminAction(req, 'UPDATE_WITH_PHOTO_ERROR', e.message);
-    res.status(500).json({ error: 'Sunucu hatası oluştu.' });
-  } finally {
-    client.release();
+    console.error('❌ Hata:', e);
+    // Eğer cevap daha önce gönderilmediyse hata dön
+    if (!res.headersSent) {
+        client.release();
+        return res.status(500).json({ error: 'Sunucu hatası.' });
+    }
   }
 });
 
-// ==========================================
-// 🗑️ ÜRÜN SİLME (DELETE)
-// ==========================================
-app.delete('/admin/v1/products/:id/delete', authenticateAdmin, async (req, res) => {
-  const productId = req.params.id;
 
-  try {
-    // 1. Ürün var mı kontrol et
-    const check = await pool.query('SELECT id FROM products WHERE id = $1', [productId]);
-    if (check.rows.length === 0) {
-      return res.status(404).json({ error: 'Silinecek ürün bulunamadı.' });
-    }
-
-    // 2. Ürünü sil
-    await pool.query('DELETE FROM products WHERE id = $1', [productId]);
-
-    // 3. Logla
-    await logAdminAction(req, 'DELETE_PRODUCT', `Ürün silindi ID: ${productId}`);
-
-    return res.status(200).json({ message: 'Ürün başarıyla silindi.' });
-  } catch (e) {
-    console.error('❌ Ürün silme hatası:', e);
-    await logAdminAction(req, 'DELETE_PRODUCT_ERROR', e.message);
-    return res.status(500).json({ error: 'Sunucu hatası.' });
-  }
-});
 
 // ==================================================
 // 🧬 ÜRÜN İÇERİK VE ALERJEN YÖNETİMİ
@@ -745,22 +766,9 @@ app.post('/admin/v1/products/:id/relations', async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    // --- A) ALERJEN GÜNCELLEME ---
-    // Önce mevcut ilişkileri temizle
-    await client.query('DELETE FROM product_allergens WHERE product_id = $1', [productId]);
-    
-    // Yeni seçilenleri ekle
-    if (allergenIds && allergenIds.length > 0) {
-      for (const algId of allergenIds) {
-        await client.query(
-          'INSERT INTO product_allergens (product_id, allergen_id) VALUES ($1, $2)',
-          [productId, algId]
-        );
-      }
-    }
 
     // --- B) İÇERİK (INGREDIENTS) GÜNCELLEME ---
-    // Önce mevcut ilişkileri temizle
+
     await client.query('DELETE FROM product_ingredients WHERE product_id = $1', [productId]);
 
     if (ingredients && ingredients.length > 0) {
@@ -807,15 +815,41 @@ app.post('/admin/v1/products/:id/relations', async (req, res) => {
 // ==========================================
 app.get('/admin/v1/feedbacks/list', authenticateAdmin, async (req, res) => {
   try {
-    // user_feedback tablosundan verileri çekiyoruz.
-    // Eğer 'default_users' tablosu ile join yapmak istersen sorguyu değiştirebiliriz.
-    // Şimdilik doğrudan mesajları alalım.
-    const { rows } = await pool.query(
-      'SELECT id, user_id, subject, message, image_url, created_at FROM user_feedback ORDER BY created_at DESC'
-    );
+    // JOIN SORGUSU: user_feedback ile default_users tablolarını birleştiriyoruz.
+    // Not: Kullanıcı tablosunun adı 'default_users', isim kolonu 'name', soyisim 'surname' varsayıldı.
+    // Eğer farklıysa (örn: 'users', 'full_name') ona göre düzeltmelisin.
+    
+    const query = `
+      SELECT 
+        f.id, 
+        f.user_id, 
+        f.subject, 
+        f.message, 
+        f.image_url, 
+        f.created_at,
+        u.name,  
+        u.email
+      FROM user_feedback f
+      LEFT JOIN default_users u ON f.user_id = u.id
+      ORDER BY f.created_at DESC
+    `;
+
+    const { rows } = await pool.query(query);
 
     await logAdminAction(req, 'LIST_FEEDBACK', `Toplam ${rows.length} bildirim listelendi.`);
-    return res.status(200).json({ feedbacks: rows });
+    
+    // Frontend'e daha temiz veri gönderelim
+    const formattedRows = rows.map(row => ({
+        id: row.id,
+        title: row.subject,
+        message: row.message,
+        imageUrl: row.image_url, // DB'den gelen: /user_uploads/feedback/...
+        sender: row.name ? `${row.name}` : row.email, // İsim yoksa email göster
+        email: row.email,
+        date: row.created_at
+    }));
+
+    return res.status(200).json({ feedbacks: formattedRows });
   } catch (e) {
     console.error('❌ Feedback listeleme hatası:', e);
     await logAdminAction(req, 'LIST_FEEDBACK_ERROR', e.message);
@@ -1108,6 +1142,106 @@ app.delete('/admin/v1/ingredients/:id/delete', async (req, res) => {
     return res.status(500).json({ error: 'Sunucu hatası.' });
   }
 });
+
+/*
+==============================================
+📸 FOTOĞRAF YÖNETİMİ (GALERİ)
+==============================================
+*/
+
+// 1. Ürüne ait fotoğrafları listele
+app.get('/admin/v1/products/:id/photos', (req, res) => {
+  const productId = req.params.id;
+  const dir = path.join(__dirname, 'product-photos');
+
+  fs.readdir(dir, (err, files) => {
+    if (err) {
+      return res.status(500).json({ error: 'Klasör okunamadı.' });
+    }
+
+    // Dosya isimleri "{productId}_..." ile başlayanları filtrele
+    const productPhotos = files.filter(file => file.startsWith(`${productId}_`));
+    
+    // Tam URL'leri oluştur (Backend sunucu adresine göre)
+    // Örn: /product-photos/1_2342.jpg
+    const photoUrls = productPhotos.map(file => `/product-photos/${file}`);
+
+    res.json({ photos: photoUrls });
+  });
+});
+
+// 2. Tekil Fotoğraf Silme
+app.delete('/admin/v1/products/photos/delete', (req, res) => {
+  const { photoName } = req.body; // Örn: "1_5932.jpg" (URL değil, dosya adı)
+
+  if (!photoName) return res.status(400).json({ error: 'Dosya adı gerekli.' });
+
+  // Güvenlik: Sadece dosya adı olduğundan emin ol (dizin geçişi engelleme)
+  const safeName = path.basename(photoName);
+  const filePath = path.join(__dirname, 'product-photos', safeName);
+
+  if (fs.existsSync(filePath)) {
+    fs.unlink(filePath, (err) => {
+      if (err) return res.status(500).json({ error: 'Silme hatası.' });
+      res.json({ success: true, message: 'Fotoğraf silindi.' });
+    });
+  } else {
+    res.status(404).json({ error: 'Dosya bulunamadı.' });
+  }
+});
+
+// 3. Mevcut Ürüne Yeni Fotoğraf Ekleme
+app.post("/admin/v1/products/:id/add-photo", uploadProductPhotos.array("photos", 5), async (req, res) => {
+    const productId = req.params.id;
+    const photos = req.files;
+
+    if (!photos || photos.length === 0) {
+        return res.status(400).json({ error: "Fotoğraf yüklenmedi." });
+    }
+
+    // Dosyaları isimlendir
+    for (const file of photos) {
+        const ext = path.extname(file.originalname);
+        const randomSuffix = Math.floor(Math.random() * 10000);
+        const newFileName = `${productId}_${randomSuffix}${ext}`;
+        const newPath = path.join(__dirname, "product-photos", newFileName);
+        
+        fs.renameSync(file.path, newPath);
+    }
+    
+    // Not: Burada Python scripti (embedding) tekrar çalıştırılabilir ama
+    // şimdilik sadece galeriye ekliyoruz.
+    res.json({ success: true, message: `${photos.length} fotoğraf eklendi.` });
+});
+
+
+// ==========================================
+// 🗑️ ÜRÜN SİLME (DELETE)
+// ==========================================
+app.delete('/admin/v1/products/:id/delete', authenticateAdmin, async (req, res) => {
+  const productId = req.params.id;
+
+  try {
+    // 1. Ürün var mı kontrol et
+    const check = await pool.query('SELECT id FROM products WHERE id = $1', [productId]);
+    if (check.rows.length === 0) {
+      return res.status(404).json({ error: 'Silinecek ürün bulunamadı.' });
+    }
+
+    // 2. Ürünü sil
+    await pool.query('DELETE FROM products WHERE id = $1', [productId]);
+
+    // 3. Logla
+    await logAdminAction(req, 'DELETE_PRODUCT', `Ürün silindi ID: ${productId}`);
+
+    return res.status(200).json({ message: 'Ürün başarıyla silindi.' });
+  } catch (e) {
+    console.error('❌ Ürün silme hatası:', e);
+    await logAdminAction(req, 'DELETE_PRODUCT_ERROR', e.message);
+    return res.status(500).json({ error: 'Sunucu hatası.' });
+  }
+});
+
 
 // Sunucuyu Dinle
 app.listen(PORT, '0.0.0.0', () => {
