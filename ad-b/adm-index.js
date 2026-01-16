@@ -257,7 +257,7 @@ app.post('/admin/v1/change-password', authenticateAdmin, async (req, res) => {
    🌾 ALERJEN İŞLEMLERİ (Listeleme, Arama, Ekleme, Detay)
 */
 
-// Tümünü Listele
+// Alerjen Tümünü Listele
 app.get('/admin/v1/allergens/list-all-allergens', authenticateAdmin, async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT id, name FROM allergens ORDER BY id ASC');
@@ -271,7 +271,7 @@ app.get('/admin/v1/allergens/list-all-allergens', authenticateAdmin, async (req,
   }
 });
 
-// Arama Yap
+// Alerjen Arama Yap
 app.get('/admin/v1/allergens/search-allergens', authenticateAdmin, async (req, res) => {
   try {
     const searchQuery = req.query.q || '';
@@ -291,7 +291,7 @@ app.get('/admin/v1/allergens/search-allergens', authenticateAdmin, async (req, r
   }
 });
 
-// Yeni Ekle
+// Alerjen Yeni Ekle
 app.post('/admin/v1/allergens/add-allergen', authenticateAdmin, async (req, res) => {
   try {
     const { name, description } = req.body;
@@ -311,7 +311,7 @@ app.post('/admin/v1/allergens/add-allergen', authenticateAdmin, async (req, res)
   }
 });
 
-// Detay Getir
+// Alerjen Detayı Getir
 app.get('/admin/v1/allergens/:id/full-info', authenticateAdmin, async (req, res) => {
   const allergenId = req.params.id;
   try {
@@ -336,6 +336,34 @@ app.get('/admin/v1/allergens/:id/full-info', authenticateAdmin, async (req, res)
     return res.status(500).json({ error: 'Sunucu hatası' });
   }
 });
+
+// Alerjen Güncelleme
+app.put('/admin/v1/allergens/:id/edit', authenticateAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, description } = req.body;
+    await pool.query('UPDATE allergens SET name = $1, description = $2 WHERE id = $3', [name, description, id]);
+    await logAdminAction(req, 'UPDATE_ALLERGEN', `Alerjen güncellendi: ${name}`);
+    res.json({ message: 'Alerjen güncellendi.' });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Sunucu hatası' });
+  }
+});
+
+// Alerjen Silme
+app.delete('/admin/v1/allergens/:id/delete', authenticateAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    await pool.query('DELETE FROM allergens WHERE id = $1', [id]);
+    await logAdminAction(req, 'DELETE_ALLERGEN', `Alerjen silindi ID: ${id}`);
+    res.json({ message: 'Alerjen silindi.' });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Sunucu hatası' });
+  }
+});
+
 
 /*
    🛍️ ÜRÜN İŞLEMLERİ (Fotoğraflı ve Fotoğrafsız)
@@ -521,8 +549,7 @@ app.get('/admin/v1/products/:id/view', authenticateAdmin, async (req, res) => {
   }
 });
 
-// ✏️ Ürün Güncelleme (PUT İsteği)
-// DİKKAT: app.get değil, app.put kullanıyoruz!
+// ✏️ Ürün Güncelleme 
 app.put('/admin/v1/products/:id/edit', authenticateAdmin, async (req, res) => {
   const productId = req.params.id;
   // Flutter'dan gelen yeni verileri alıyoruz
@@ -719,24 +746,24 @@ app.get('/admin/v1/dashboard/stats', authenticateAdmin, async (req, res) => {
     const feedbackCountRes = await pool.query('SELECT COUNT(*) FROM user_feedback');
     const totalFeedback = parseInt(feedbackCountRes.rows[0].count);
 
-    // 3. En Çok Tarananlar (Şimdilik ürünleri ID sırasına göre 5 tane alalım, 
-    // 1. Sorguya scan_count'u da dahil ediyoruz
+    // 3. Toplam Alerjen Sayısı 
+    const allergenCountRes = await pool.query('SELECT COUNT(*) FROM allergens');
+    const totalAllergens = parseInt(allergenCountRes.rows[0].count);
+
+    // 4. En Çok Tarananlar
     const recentProductsRes = await pool.query(
       'SELECT name, scan_count FROM products ORDER BY scan_count DESC LIMIT 5'
     );
 
-    // 2. Formatı Flutter'a uygun hale getiriyoruz (Gerçek veriyi kullanarak)
     const mostScanned = recentProductsRes.rows.map(p => ({
       name: p.name,
-      count: p.scan_count || 0 // Eğer scan_count NULL ise 0 döndürür
+      count: p.scan_count || 0
     }));
-
-    // Test için console log
-    console.log('📊 En çok taranan ürünler:', mostScanned);
 
     return res.status(200).json({
       total_products: totalProducts,
       total_feedback: totalFeedback,
+      total_allergens: totalAllergens, 
       most_scanned: mostScanned
     });
 
