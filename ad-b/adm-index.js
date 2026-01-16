@@ -712,6 +712,96 @@ app.delete('/admin/v1/products/:id/delete', authenticateAdmin, async (req, res) 
   }
 });
 
+// ==================================================
+// 🧬 ÜRÜN İÇERİK VE ALERJEN YÖNETİMİ
+// ==================================================
+
+// 1. Ürünün İçerik ve Alerjen Bilgilerini Getir
+app.get('/admin/v1/products/:id/relations', async (req, res) => {
+  const productId = req.params.id;
+  try {
+    
+    const { rows: ingredientRows } = await pool.query(
+      `SELECT i.name FROM product_ingredients pi 
+       JOIN ingredients i ON pi.ingredient_id = i.id 
+       WHERE pi.product_id = $1`,
+      [productId]
+    );
+    const ingredients = ingredientRows.map(r => r.name);
+
+    res.json({ingredients });
+  } catch (e) {
+    console.error('❌ İlişki getirme hatası:', e);
+    res.status(500).json({ error: 'Veriler alınamadı.' });
+  }
+});
+
+// 2. Ürünün İçerik ve Alerjenlerini Güncelle
+app.post('/admin/v1/products/:id/relations', async (req, res) => {
+  const client = await pool.connect();
+  const productId = req.params.id;
+  const { allergenIds, ingredients } = req.body; // ingredients: ["Su", "Şeker"] gibi array gelmeli
+
+  try {
+    await client.query('BEGIN');
+
+    // --- A) ALERJEN GÜNCELLEME ---
+    // Önce mevcut ilişkileri temizle
+    await client.query('DELETE FROM product_allergens WHERE product_id = $1', [productId]);
+    
+    // Yeni seçilenleri ekle
+    if (allergenIds && allergenIds.length > 0) {
+      for (const algId of allergenIds) {
+        await client.query(
+          'INSERT INTO product_allergens (product_id, allergen_id) VALUES ($1, $2)',
+          [productId, algId]
+        );
+      }
+    }
+
+    // --- B) İÇERİK (INGREDIENTS) GÜNCELLEME ---
+    // Önce mevcut ilişkileri temizle
+    await client.query('DELETE FROM product_ingredients WHERE product_id = $1', [productId]);
+
+    if (ingredients && ingredients.length > 0) {
+      for (const name of ingredients) {
+        const cleanName = name.trim();
+        if(!cleanName) continue;
+
+        // 1. İçerik 'ingredients' tablosunda var mı? Yoksa ekle.
+        let ingRes = await client.query('SELECT id FROM ingredients WHERE name = $1', [cleanName]);
+        let ingId;
+
+        if (ingRes.rows.length === 0) {
+          const insertIng = await client.query(
+            'INSERT INTO ingredients (name) VALUES ($1) RETURNING id',
+            [cleanName]
+          );
+          ingId = insertIng.rows[0].id;
+        } else {
+          ingId = ingRes.rows[0].id;
+        }
+
+        // 2. İlişki tablosuna ekle
+        await client.query(
+          'INSERT INTO product_ingredients (product_id, ingredient_id) VALUES ($1, $2)',
+          [productId, ingId]
+        );
+      }
+    }
+
+    await client.query('COMMIT');
+    res.json({ message: 'İçerik ve Alerjenler güncellendi.' });
+
+  } catch (e) {
+    await client.query('ROLLBACK');
+    console.error('❌ İlişki güncelleme hatası:', e);
+    res.status(500).json({ error: 'Güncelleme başarısız.' });
+  } finally {
+    client.release();
+  }
+});
+
 // ==========================================
 // 📨 FEEDBACK LİSTELEME (READ)
 // ==========================================
@@ -773,6 +863,251 @@ app.get('/admin/v1/dashboard/stats', authenticateAdmin, async (req, res) => {
   }
 });
 
+
+// ==============================================
+// 🔹 Ürün İçin İçerik Listesi ve Durum Kontrolü
+// ==============================================
+app.get('/admin/v1/products/:id/ingredients', async (req, res) => {
+  const productId = req.params.id;
+  const searchQuery = req.query.q || ''; // Arama parametresi
+  
+  try {
+    const likePattern = `%${searchQuery}%`;
+    
+    // SQL Açıklaması:
+    // 1. Tüm ingredients tablosunu getirir (veya aramaya göre filtreler).
+    // 2. product_ingredients tablosuyla LEFT JOIN yapar.
+    // 3. Eğer product_ingredients'te eşleşme varsa (pi.product_id doluysa) is_selected TRUE olur.
+    
+    const query = `
+      SELECT 
+        i.id, 
+        i.name, 
+        CASE WHEN pi.product_id IS NOT NULL THEN true ELSE false END as is_selected
+      FROM ingredients i
+      LEFT JOIN product_ingredients pi 
+        ON i.id = pi.ingredient_id AND pi.product_id = $1
+      WHERE i.name ILIKE $2
+      ORDER BY is_selected DESC, i.name ASC; 
+    `;
+    // Not: is_selected DESC ile seçili olanları en üste getiriyoruz.
+
+    const { rows } = await pool.query(query, [productId, likePattern]);
+
+    return res.json({ ingredients: rows });
+
+  } catch (e) {
+    console.error('❌ Ürün içerikleri listelenirken hata:', e);
+    return res.status(500).json({ error: 'Sunucu hatası: İçerikler çekilemedi.' });
+  }
+});
+
+// ==============================================
+// 🔹 Yeni İçerik (Ingredient) Oluşturma
+// ==============================================
+app.post('/admin/v1/ingredients/add', async (req, res) => {
+  // 1️⃣ İLK KONTROL: Fonksiyona giriyor mu?
+  console.log('📥 [İSTEK GELDİ] URL: /admin/v1/ingredients/add');
+  console.log('📦 Gelen Body:', req.body);
+
+  const { name, description } = req.body;
+
+  if (!name) {
+    console.log('⚠️ Hata: İsim boş geldi.');
+    return res.status(400).json({ error: 'İçerik adı zorunludur.' });
+  }
+
+  try {
+    // Duplicate kontrolü
+    const checkQuery = 'SELECT id FROM ingredients WHERE name ILIKE $1';
+    const checkResult = await pool.query(checkQuery, [name]);
+
+    if (checkResult.rows.length > 0) {
+      console.log('⚠️ Hata: Bu içerik zaten var.');
+      return res.status(409).json({ 
+        error: 'Bu içerik zaten mevcut.', 
+        existingId: checkResult.rows[0].id 
+      });
+    }
+
+    // Ekleme işlemi
+    // DİKKAT: Veritabanında 'description' sütunu var mı? Yoksa hata verir.
+    const insertQuery = 'INSERT INTO ingredients (name, description) VALUES ($1, $2) RETURNING id, name';
+    const { rows } = await pool.query(insertQuery, [name, description || null]);
+
+    console.log('✅ BAŞARILI: Yeni içerik eklendi, ID:', rows[0].id);
+
+    return res.status(201).json({ 
+      message: 'Yeni içerik eklendi.', 
+      ingredient: rows[0] 
+    });
+
+  } catch (e) {
+    console.error('❌ KRİTİK HATA:', e);
+    return res.status(500).json({ error: 'Sunucu hatası: İçerik eklenemedi.' });
+  }
+});
+
+// ==============================================
+// 🔹 Ürün İçeriklerini Güncelleme (Many-to-Many)
+// ==============================================
+app.post('/admin/v1/products/:id/update-ingredients', async (req, res) => {
+  const productId = req.params.id;
+  const { selected_ingredient_ids } = req.body; // Array of IDs [1, 5, 20]
+
+  if (!Array.isArray(selected_ingredient_ids)) {
+    return res.status(400).json({ error: 'Liste formatı geçersiz.' });
+  }
+
+  const client = await pool.connect(); // Transaction için client alıyoruz
+
+  try {
+    await client.query('BEGIN'); // Transaction Başlat
+
+    // 1. Mevcut bağlı içerikleri çek
+    const { rows: existingRows } = await client.query(
+      'SELECT ingredient_id FROM product_ingredients WHERE product_id = $1',
+      [productId]
+    );
+    const currentIds = existingRows.map(r => r.ingredient_id);
+
+    // 2. Eklenecek ve Silinecekleri Hesapla
+    // Yeni listede olup eskide olmayanlar -> Eklenecek
+    const toAdd = selected_ingredient_ids.filter(id => !currentIds.includes(id));
+    
+    // Eskide olup yeni listede olmayanlar -> Silinecek
+    const toDelete = currentIds.filter(id => !selected_ingredient_ids.includes(id));
+
+    // 3. Ekleme İşlemi
+    for (const id of toAdd) {
+      await client.query(
+        'INSERT INTO product_ingredients (product_id, ingredient_id) VALUES ($1, $2)',
+        [productId, id]
+      );
+    }
+
+    // 4. Silme İşlemi
+    for (const id of toDelete) {
+      await client.query(
+        'DELETE FROM product_ingredients WHERE product_id = $1 AND ingredient_id = $2',
+        [productId, id]
+      );
+    }
+
+    await client.query('COMMIT'); // İşlemi onayla
+    
+    return res.json({ 
+      success: true, 
+      message: 'İçerikler güncellendi.',
+      addedCount: toAdd.length,
+      deletedCount: toDelete.length
+    });
+
+  } catch (e) {
+    await client.query('ROLLBACK'); // Hata varsa geri al
+    console.error('❌ İçerik güncelleme hatası:', e);
+    return res.status(500).json({ error: 'Sunucu hatası: Güncelleme yapılamadı.' });
+  } finally {
+    client.release();
+  }
+});
+
+
+app.get('/admin/v1/ingredients/search', async (req, res) => {
+  try {
+    // 1. URL'den sorguyu al (Örn: ?q=şeker)
+    const searchQuery = req.query.q || ''; 
+    
+    // 2. PostgreSQL için arama deseni oluştur (%şeker%)
+    const likePattern = `%${searchQuery}%`;
+
+    // 3. Veritabanı sorgusu
+    // ILIKE: Büyük/küçük harf duyarsız arama yapar (Şeker = şeker)
+    // ORDER BY name ASC: Alfabetik sıralar
+    // LIMIT 50: Listeyi çok şişirmemek için en fazla 50 sonuç döndürür
+    const { rows } = await pool.query(
+      'SELECT id, name FROM ingredients WHERE name ILIKE $1 ORDER BY name ASC LIMIT 50',
+      [likePattern]
+    );
+
+    // 4. Sonucu Flutter'a gönder
+    return res.status(200).json({ ingredients: rows });
+
+  } catch (e) {
+    console.error('❌ İçerik arama hatası:', e);
+    return res.status(500).json({ error: 'Sunucu hatası: İçerik aranamadı.' });
+  }
+});
+
+/*
+==============================================
+✏️ İÇERİK GÜNCELLEME (RENAME)
+==============================================
+*/
+app.put('/admin/v1/ingredients/:id/edit', async (req, res) => {
+  const id = req.params.id;
+  const { name, description } = req.body;
+
+  if (!name) {
+    return res.status(400).json({ error: 'İçerik ismi boş olamaz.' });
+  }
+
+  try {
+    const updateQuery = `
+      UPDATE ingredients 
+      SET name = $1, description = $2 
+      WHERE id = $3 
+      RETURNING *
+    `;
+    const { rows } = await pool.query(updateQuery, [name, description || null, id]);
+
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'İçerik bulunamadı.' });
+    }
+
+    return res.json({ message: 'İçerik güncellendi.', ingredient: rows[0] });
+
+  } catch (e) {
+    console.error('❌ İçerik güncelleme hatası:', e);
+    // Eğer isim çakışması olursa (Unique constraint)
+    if (e.code === '23505') {
+        return res.status(409).json({ error: 'Bu isimde başka bir içerik zaten var.' });
+    }
+    return res.status(500).json({ error: 'Sunucu hatası.' });
+  }
+});
+
+/*
+==============================================
+🗑️ İÇERİK SİLME
+==============================================
+*/
+app.delete('/admin/v1/ingredients/:id/delete', async (req, res) => {
+  const id = req.params.id;
+
+  try {
+    // Not: Eğer veritabanında "ON DELETE CASCADE" ayarlı değilse ve 
+    // bu içerik bir üründe kullanılıyorsa hata verebilir.
+    // Şimdilik doğrudan silmeyi deniyoruz.
+    
+    const deleteQuery = 'DELETE FROM ingredients WHERE id = $1 RETURNING id';
+    const { rows } = await pool.query(deleteQuery, [id]);
+
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'İçerik bulunamadı veya zaten silinmiş.' });
+    }
+
+    return res.json({ message: 'İçerik silindi.', id: id });
+
+  } catch (e) {
+    console.error('❌ İçerik silme hatası:', e);
+    // Foreign key hatası (başka tabloda kullanılıyor) kodu genellikle '23503'tür
+    if (e.code === '23503') {
+        return res.status(400).json({ error: 'Bu içerik bazı ürünlerde kullanılıyor, önce oradan kaldırmalısınız.' });
+    }
+    return res.status(500).json({ error: 'Sunucu hatası.' });
+  }
+});
 
 // Sunucuyu Dinle
 app.listen(PORT, '0.0.0.0', () => {
