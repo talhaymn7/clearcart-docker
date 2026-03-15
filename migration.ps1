@@ -1,23 +1,46 @@
-$MigrationFolder = ".\Linux_Migration_Pack"
+$MigrationFolder = ".\BackupFolder"
 $Date = Get-Date -Format "yyyy-MM-dd"
 
+# Klasör temizliği
 If (Test-Path $MigrationFolder) { Remove-Item $MigrationFolder -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $MigrationFolder | Out-Null
 Write-Host "Paketleme klasörü oluşturuldu..." -ForegroundColor Cyan
 
-Write-Host "Veritabanı dışarı aktarılıyor (Dump)..." -ForegroundColor Yellow
-docker exec -e PGPASSWORD=REMOVED-DB-PASSWORD clearcart-db pg_dump -U postgres -d clearcart > "$MigrationFolder\clearcart_full_backup.sql"
+# ---------------------------------------------------------
+# VERİTABANI YEDEĞİ (TÜRKÇE KARAKTER GARANTİLİ)
+# ---------------------------------------------------------
+Write-Host "Veritabanı dışarı aktarılıyor (UTF-8 Plain Text)..." -ForegroundColor Yellow
+
+# Önce eski geçici dosyayı temizle
+docker exec clearcart-db rm -f /tmp/clearcart_full_backup.sql
+
+# 🛠️ KRİTİK KOMUT:
+# 1. -e PGCLIENTENCODING=UTF8 : PostgreSQL client'ını UTF-8 moduna zorla.
+# 2. -F p : Plain Text formatı (Notepad ile okunabilir).
+# 3. -E UTF8 : Export encoding UTF-8 olsun.
+docker exec -e PGPASSWORD=REMOVED-DB-PASSWORD -e PGCLIENTENCODING=UTF8 clearcart-db pg_dump -U postgres -d clearcart -F p -E UTF8 -f /tmp/clearcart_full_backup.sql
 
 if ($LASTEXITCODE -eq 0) {
-    Write-Host "Veritabanı yedeği alındı." -ForegroundColor Green
+    Write-Host "Yedek container içinde oluşturuldu, masaüstüne alınıyor..." -ForegroundColor Cyan
+    
+    # docker cp ile dosyayı byte-byte kopyala (Karakter bozulmasını engeller)
+    docker cp clearcart-db:/tmp/clearcart_full_backup.sql "$MigrationFolder\clearcart_full_backup.sql"
+    
+    # İçerideki çöpü sil
+    docker exec clearcart-db rm /tmp/clearcart_full_backup.sql
+    
+    Write-Host "✅ Veritabanı yedeği alındı." -ForegroundColor Green
 } else {
-    Write-Host "HATA: Veritabanı yedeği alınamadı! Container çalışıyor mu?" -ForegroundColor Red
+    Write-Host "❌ HATA: Veritabanı yedeği alınamadı!" -ForegroundColor Red
     Exit
 }
 
-Write-Host "Dosyalar kopyalanıyor (node_modules hariç tutuluyor)..." -ForegroundColor Yellow
+# ---------------------------------------------------------
+# DOSYA KOPYALAMA
+# ---------------------------------------------------------
+Write-Host "Dosyalar kopyalanıyor..." -ForegroundColor Yellow
 
-$ExcludeDirs = @("node_modules", ".git", ".idea", ".vscode", "dist", "build")
+$ExcludeDirs = @("node_modules", ".git", ".idea", ".vscode", "dist", "build", "coverage")
 $Source = "."
 $Dest = $MigrationFolder
 
@@ -28,5 +51,5 @@ Copy-Item "docker-compose.yml" -Destination $Dest
 
 Write-Host "---------------------------------------------------"
 Write-Host "HAZIRLIK TAMAMLANDI!" -ForegroundColor Green
-Write-Host "Lütfen '$MigrationFolder' klasörünü Ubuntu sunucuna taşı." -ForegroundColor Cyan
+Write-Host "Oluşan .sql dosyasını VS Code ile açarsan Türkçe karakterlerin düzgün olduğunu göreceksin." -ForegroundColor Cyan
 Write-Host "---------------------------------------------------"

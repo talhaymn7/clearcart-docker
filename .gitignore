@@ -32,3 +32,9 @@ __pycache__/
 # --- İşletim Sistemi Dosyaları ---
 .DS_Store
 Thumbs.db
+
+#Backup
+BackupFolder/
+db-tables.txt
+migration.ps1
+migration.sh
