@@ -56,14 +56,15 @@ COPY . .
 # -----------------------------------------------------
 # 🔑 RSA Anahtar Çiftini Oluştur (JWT İmzası İçin)
 # -----------------------------------------------------
-RUN mkdir -p /app/keys/client_keys /app/keys
+RUN mkdir -p /app/keys /app/client_keys
 RUN openssl genrsa -out /app/keys/private.pem 2048 && \
     openssl rsa -in /app/keys/private.pem -out /app/keys/public.pem -pubout
 RUN chmod 600 /app/keys/private.pem
 RUN chmod 644 /app/keys/public.pem
-# Kullanıcı keyleri dizinine Backend'in yazma izni olmalı.
+# Kullanıcı keyleri /app/keys DIŞINDA tutulur: docker-compose bu dizini host'tan
+# bind ediyor, /app/keys içinde olsaydı sunucu anahtarlarının üstüne mount edilirdi.
 # 777 DEĞİL: bu dizin özel anahtar barındırıyor, sadece sahibi erişebilmeli.
-RUN chmod 700 /app/keys/client_keys
+RUN chmod 700 /app/client_keys
 
 
 # -----------------------------------------------------

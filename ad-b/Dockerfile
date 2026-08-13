@@ -56,11 +56,11 @@ RUN sed -i 's/\r$//' start.sh
 # -----------------------------------------------------
 # RSA Kayıtları oluşturma
 # -----------------------------------------------------
-RUN mkdir -p /app/keys /app/keys/client_keys
+RUN mkdir -p /app/keys
 RUN openssl genrsa -out /app/keys/private.pem 2048 && \
     openssl rsa -in /app/keys/private.pem -out /app/keys/public.pem -pubout
 
-RUN chmod 600 /app/keys/private.pem && chmod 644 /app/keys/public.pem && chmod 700 /app/keys/client_keys
+RUN chmod 600 /app/keys/private.pem && chmod 644 /app/keys/public.pem
 
 # -----------------------------------------------------
 # 🔐 İzinleri ve klasörleri ayarla

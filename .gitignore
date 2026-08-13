@@ -17,7 +17,9 @@ ad-b/keys/
 nginx/.htpasswd
 
 # --- Veritabanı yedekleri (kişisel veri içerir!) ---
+# Dump'lar hariç tutulur; şema tanımı (db/) versiyonlanır.
 *.sql
+!db/*.sql
 *.dump
 BackupFolder/
 Linux_Migration_Pack/

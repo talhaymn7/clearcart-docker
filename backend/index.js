@@ -779,8 +779,8 @@ app.post('/products/image-search', authenticateToken, upload.single('image'), as
       return res.status(500).json({ error: 'Görsel işlenemedi.' });
     }
 
-    console.log('✅ Python çıktısı alındı.');
-    console.log('📤 STDOUT:', stdout);
+    // Çıktının tamamı 1000 boyutlu gömme vektörü içeriyor; loga basmıyoruz.
+    console.log(`✅ Python çıktısı alındı (${stdout.length} byte).`);
 
     try {
       const result = JSON.parse(stdout); // cc-ai.py çıktısı JSON olmalı
@@ -797,10 +797,13 @@ app.post('/products/image-search', authenticateToken, upload.single('image'), as
         )
       `;
 
+      /* pgvector girdiyi '[1,2,3]' biçiminde bekler. Diziyi doğrudan verirsek
+         node-postgres onu Postgres dizi literali '{1,2,3}' olarak serileştirir
+         ve ::vector cast'i "invalid input syntax for type vector" ile patlar. */
       const { rows } = await pool.query(query, [
-        image_embedding,
-        mean_rgb,
-        histogram,
+        JSON.stringify(image_embedding),
+        JSON.stringify(mean_rgb),
+        JSON.stringify(histogram),
         barcode || null,
       ]);
 
@@ -826,8 +829,7 @@ app.post('/products/image-search', authenticateToken, upload.single('image'), as
         return res.json({ found: false });
       }
     } catch (parseError) {
-      console.error('❌ JSON parse hatası:', parseError);
-      console.error('📤 stdout:', stdout);
+      console.error('❌ Görsel arama hatası:', parseError.message);
       return res.status(500).json({ error: 'Görsel analizi başarısız oldu.' });
     } finally {
       fs.unlink(imagePath, () => {

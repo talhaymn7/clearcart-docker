@@ -26,7 +26,7 @@ listesini tek tek okumak demektir. Clear Cart bu adımı ortadan kaldırır:
 1. Kullanıcı ürünün fotoğrafını çeker.
 2. Sistem **barkodu okumayı** dener — barkod okunursa eşleşme kesindir.
 3. Barkod yoksa veya okunamazsa **görsel benzerlik** devreye girer: fotoğraftan çıkarılan
-   1792 boyutlu gömme vektörü (EfficientNet-B4), ortalama RGB ve renk histogramı, katalogdaki
+   1000 boyutlu gömme vektörü (EfficientNet-B4), ortalama RGB ve renk histogramı, katalogdaki
    ürünlerle pgvector üzerinden karşılaştırılır.
 4. Eşleşen ürünün içerik listesi, kullanıcının **kendi alerjen profiliyle** kesiştirilir.
 5. Sonuç: "Bu üründe FINDIK var" — ya da temiz.
@@ -104,9 +104,15 @@ openssl rand -hex 64      # JWT_SECRET için
 # 2) Admin paneli Basic Auth kullanıcısı
 htpasswd -B -c nginx/.htpasswd admin
 
-# 3) Ayağa kaldır
+# 3) Ayağa kaldır (şema ilk açılışta otomatik uygulanır)
 docker compose up -d --build
 curl http://localhost/health     # -> ok
+```
+
+NGROK tüneli isterseniz ayrı bir profille açılır:
+
+```bash
+docker compose --profile ngrok up -d
 ```
 
 <details>
@@ -238,15 +244,24 @@ clearcart-docker/
 ├── ad-b/                    # Admin API'si (:10031)
 │   ├── adm-index.js         # Katalog yönetimi + audit log
 │   └── security.js
+├── db/01-schema.sql         # Şema — ilk açılışta otomatik uygulanır
 ├── nginx/nginx.conf         # Yönlendirme + Basic Auth
 ├── docker-compose.yml
 └── .env.example             # Ortam değişkeni şablonu
 ```
 
-### Veritabanı tabloları
+### Veritabanı
 
-`default_users` · `adm_users` · `products` · `ingredients` · `product_ingredients` ·
+Şema `db/01-schema.sql` içinde tanımlı ve PostgreSQL konteyneri **ilk kez** oluşturulurken
+`/docker-entrypoint-initdb.d/` üzerinden otomatik çalışır. Mevcut bir volume varsa
+çalışmaz — sıfırdan kurmak için `docker compose down -v && docker compose up -d`.
+
+Tablolar: `default_users` · `adm_users` · `products` · `ingredients` · `product_ingredients` ·
 `allergens` · `user_allergens` · `user_feedback` · `admin_audit_logs`
+
+Ayrıca `search_product(embedding, color, histogram, barcode)` fonksiyonu: barkod okunduysa
+kesin eşleşme, değilse gömme vektörü kosinüs benzerliğini renk ve histogramla ağırlıklı
+birleştirerek en yakın 5 ürünü döndürür.
 
 ---
 

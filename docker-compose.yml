@@ -17,6 +17,9 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      # Şema, veritabanı ilk oluşturulurken otomatik uygulanır.
+      # Mevcut bir volume varsa çalışmaz: docker compose down -v ile sıfırlayın.
+      - ./db:/docker-entrypoint-initdb.d:ro
     # ⚠️ Veritabanı yalnızca docker ağı içinden erişilebilir.
     # Host'tan psql ile bağlanmak için bu satırları geçici olarak açın:
     #   ports:
@@ -32,8 +35,10 @@ services:
     depends_on:
       - postgres
     volumes:
-      - ./backend/keys:/app/keys:ro                # Server key'leri
-      - ./backend/client_keys:/app/keys/client_keys  # Kullanıcı özel key'leri
+      # ⚠️ /app/keys BIND EDİLMEZ. Sunucunun RSA çifti imaj build'inde üretilir ve
+      # imajın içinde kalır. Host'tan boş bir dizin bind edilirse imajdaki anahtarları
+      # gölgeler ve security.js hiçbir anahtar yükleyemez.
+      - ./backend/client_keys:/app/client_keys       # Kullanıcı özel key'leri
       - ./backend/user_uploads:/app/user_uploads     # Feedback ve görseller
     environment:
       - NODE_ENV=production
@@ -44,7 +49,7 @@ services:
       - PORT=7860
       - JWT_PRIVATE_KEY_PATH=/app/keys/private.pem
       - JWT_PUBLIC_KEY_PATH=/app/keys/public.pem
-      - CLIENT_KEYS_DIR=/app/keys/client_keys       # Kullanıcı key'leri için env değişkeni
+      - CLIENT_KEYS_DIR=/app/client_keys            # Kullanıcı key'leri için env değişkeni
     expose:
       - "7860"
     restart: unless-stopped
@@ -66,17 +71,21 @@ services:
       # sıradan bir kullanıcı token'ı admin uçlarında da geçerli imzaya sahip olur.
       - JWT_PRIVATE_KEY_PATH=/app/keys/private.pem
       - JWT_PUBLIC_KEY_PATH=/app/keys/public.pem
-      - CLIENT_KEYS_DIR=/app/keys/client_keys
       - PORT=10031
     expose:
       - "10031"
     restart: unless-stopped
 
-   # 🚇 NGROK Tunnel (backend'e tünel açar)
-
+  # 🚇 NGROK Tunnel (nginx'e tünel açar) — OPSİYONEL
+  #
+  # Yalnızca "ngrok" profili ile başlar, çünkü geçerli bir authtoken gerektirir:
+  #   docker compose --profile ngrok up -d
+  #
+  # Token olmadan varsayılan olarak başlasaydı sonsuz restart döngüsüne girerdi.
   ngrok:
     image: ngrok/ngrok:latest
     container_name: clearcart-ngrok
+    profiles: ["ngrok"]
     depends_on:
       - backend
       - nginx # Nginx'i de buraya ekleyelim, çünkü tünel Nginx'e gidiyor.

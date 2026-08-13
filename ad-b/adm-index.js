@@ -469,6 +469,19 @@ function resolveProductPhotoPath(fileName) {
   return target;
 }
 
+/* Multer, route handler çalışmadan ÖNCE dosyayı diske yazar. İstek sonradan
+   reddedilirse (geçersiz ürün ID'si, eksik alan) bu dosyalar yetim kalır ve
+   tekrarlanan geçersiz istekler diski doldurabilir. Her erken dönüşte çağrılır. */
+function cleanupUploads(files) {
+  for (const file of files || []) {
+    fs.unlink(file.path, (err) => {
+      if (err && err.code !== 'ENOENT') {
+        console.warn('⚠️ Geçici yükleme silinemedi:', file.path, err.message);
+      }
+    });
+  }
+}
+
 // Ürün fotoğrafını güvenli adla product-photos altına taşır, yeni dosya adını döndürür.
 function storeProductPhoto(file, productId) {
   const fileName = `${productId}_${randomUUID()}${safeImageExtension(file.originalname)}`;
@@ -551,6 +564,7 @@ app.post('/admin/v1/products/add-with-photo', authenticateAdmin, uploadProductPh
     // Validasyon
     if (!name || !brand || !photos || photos.length === 0) {
       client.release(); // Hata varsa bağlantıyı hemen bırak
+      cleanupUploads(photos);
       return res.status(400).json({ error: "Eksik bilgi veya fotoğraf yüklenmedi." });
     }
 
@@ -725,6 +739,7 @@ app.put('/admin/v1/products/:id/edit', authenticateAdmin, async (req, res) => {
 app.put('/admin/v1/products/:id/update-with-photo', authenticateAdmin, uploadProductPhotos.array("photos", 10), async (req, res) => {
   const productId = safeProductId(req.params.id);
   if (!productId) {
+    cleanupUploads(req.files);
     return res.status(400).json({ error: 'Geçersiz ürün ID.' });
   }
 
@@ -1317,6 +1332,7 @@ app.delete('/admin/v1/products/photos/delete', (req, res) => {
 app.post("/admin/v1/products/:id/add-photo", uploadProductPhotos.array("photos", 5), async (req, res) => {
     const productId = safeProductId(req.params.id);
     if (!productId) {
+        cleanupUploads(req.files);
         return res.status(400).json({ error: "Geçersiz ürün ID." });
     }
 
