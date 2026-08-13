@@ -59,9 +59,11 @@ COPY . .
 RUN mkdir -p /app/keys/client_keys /app/keys
 RUN openssl genrsa -out /app/keys/private.pem 2048 && \
     openssl rsa -in /app/keys/private.pem -out /app/keys/public.pem -pubout
-RUN chmod 600 /app/keys/private.pem /app/keys/public.pem
-# Kullanıcı keyleri dizinine Backend'in yazma izni olmalı
-RUN chmod 777 /app/keys/client_keys
+RUN chmod 600 /app/keys/private.pem
+RUN chmod 644 /app/keys/public.pem
+# Kullanıcı keyleri dizinine Backend'in yazma izni olmalı.
+# 777 DEĞİL: bu dizin özel anahtar barındırıyor, sadece sahibi erişebilmeli.
+RUN chmod 700 /app/keys/client_keys
 
 
 # -----------------------------------------------------
@@ -74,7 +76,7 @@ RUN sed -i 's/\r$//' start.sh
 # -----------------------------------------------------
 RUN chmod +x start.sh build.sh \
  && mkdir -p /app/user_uploads \
- && chmod -R 777 /app/user_uploads
+ && chmod -R 750 /app/user_uploads
 
 # -----------------------------------------------------
 # 🧹 Build araçlarını kaldır (runtime'da gerek yok)

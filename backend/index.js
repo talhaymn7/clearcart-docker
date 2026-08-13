@@ -6,10 +6,12 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import bcrypt from 'bcrypt';
 import fs from 'fs';
-import upload from './middlewares/imageUploadMiddleware.js';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
+import upload, { ALLOWED_IMAGE_EXTENSIONS, safeImageExtension } from './middlewares/imageUploadMiddleware.js';
 import { execFile } from 'child_process';
 import pkg from 'pg';
-import { generateKeyPairSync } from 'crypto';
+import { generateKeyPairSync, randomUUID } from 'crypto';
 import { SERVER_PUBLIC_KEY, signJWT, verifyJWT } from './security.js';
 
 const { Pool } = pkg;
@@ -31,7 +33,24 @@ if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
   console.log('📁 user_uploads klasörü oluşturuldu.');
 }
-app.use(express.json()); // JSON body parse
+app.use(helmet());
+app.use(express.json({ limit: '100kb' })); // JSON body parse
+
+// 🚦 Brute-force koruması: kimlik doğrulama uçları için sıkı, genel trafik için gevşek limit
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Çok fazla deneme yapıldı. Lütfen bir süre sonra tekrar deneyin.' },
+});
+const generalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 300,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+app.use(generalLimiter);
 
 const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID); // Google Console'dan aldığın CLIENT_ID
 
@@ -39,13 +58,18 @@ app.get('/auth/public-key', (_req, res) => {
   res.type('text/plain').send(SERVER_PUBLIC_KEY);
 });
 
-// ⬇️ user_uploads klasörünü dış dünyaya aç
-app.use('/user_uploads', express.static(path.join(__dirname, 'user_uploads')));
+// ⚠️ user_uploads ARTIK statik olarak sunulmuyor.
+// Kullanıcı görselleri kimlik doğrulamalı /user_uploads/feedback/:file ucundan,
+// yalnızca dosyanın sahibine servis edilir (aşağıya bak).
 
 // Database Bağlantısı
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL
 });
+
+/* Kullanıcı bulunamadığında da bcrypt.compare çalıştırıp yanıt süresini eşitlemek için
+   kullanılan sabit hash. Karşılığı olan bir şifre yok, hiçbir zaman eşleşmez. */
+const DUMMY_BCRYPT_HASH = '$2b$12$C6UzMDM.H6dfI/f/IKcEe.7PLXhVUAqTLNBVMPHZ5LWJcAf1kXTGa';
 
 //      Password Hashing Kodu:
 async function hashPassword(password) {
@@ -73,30 +97,46 @@ const feedbackStorage = multer.diskStorage({
     cb(null, feedbackDir);
   },
   filename: (req, file, cb) => {
-    const uniqueSuffix = Date.now();
-    cb(null, `feedback_${uniqueSuffix}.jpg`);
+    // Uzantı beyaz listeden seçilir; originalname'e asla güvenilmez.
+    cb(null, `feedback_${randomUUID()}${safeImageExtension(file.originalname)}`);
   },
 });
 
-// Sadece image dosyalarına izin ver
+// Sadece izin verilen uzantıdaki görsellere izin ver.
+// Not: mimetype tamamen istemci kontrolünde olduğu için tek başına yeterli değil,
+// bu yüzden uzantı da beyaz listeye karşı doğrulanıyor.
 const feedbackUpload = multer({
   storage: feedbackStorage,
   fileFilter: (req, file, cb) => {
     if (!file.mimetype.startsWith('image/')) {
       return cb(new Error('Yalnızca görsel yüklenebilir.'));
     }
+    if (!ALLOWED_IMAGE_EXTENSIONS.includes(path.extname(file.originalname).toLowerCase())) {
+      return cb(new Error('Desteklenmeyen dosya uzantısı.'));
+    }
     cb(null, true);
   },
-  limits: { fileSize: 5 * 1024 * 1024 }, // max 5MB
+  limits: { fileSize: 5 * 1024 * 1024, files: 1 }, // max 5MB
 });
 
 
 // ===========================
 // 🔹 Kullanıcı Kayıt Endpoint
 // ===========================
-app.post('/register', async (req, res) => {
+app.post('/register', authLimiter, async (req, res) => {
   try {
     const { name, email, password } = req.body;
+
+    // 0️⃣ Girdi doğrulama
+    if (!name || !email || !password) {
+      return res.status(400).json({ error: 'Ad, e-posta ve şifre zorunludur.' });
+    }
+    if (typeof password !== 'string' || password.length < 8) {
+      return res.status(400).json({ error: 'Şifre en az 8 karakter olmalıdır.' });
+    }
+    if (typeof email !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ error: 'Geçerli bir e-posta adresi giriniz.' });
+    }
 
     // 1️⃣ E-posta kontrolü
     const { rows: existing } = await pool.query(
@@ -154,14 +194,14 @@ app.post('/register', async (req, res) => {
     });
   } catch (e) {
     console.error('❌ Register Hatası:', e);
-    return res.status(500).json({ error: e.message || 'Sunucu hatası' });
+    return res.status(500).json({ error: 'Sunucu hatası' });
   }
 });
 
 // ===========================
 // 🔹 Kullanıcı Giriş Endpoint
 // ===========================
-app.post('/login', async (req, res) => {
+app.post('/login', authLimiter, async (req, res) => {
   try {
     const { email, password } = req.body;
 
@@ -177,28 +217,26 @@ app.post('/login', async (req, res) => {
     );
     const user = rows[0];
 
-    if (!user) {
-      return res.status(401).json({ error: 'Kullanıcı bulunamadı. Lütfen kaydolun.' });
+    /* 3️⃣ Kimlik doğrulama.
+       Kullanıcının var olup olmadığı, Google hesabı olup olmadığı ve şifrenin yanlış olması
+       AYNI cevabı döndürür — aksi halde hangi e-postaların kayıtlı olduğu dışarıdan öğrenilebilir.
+       Kullanıcı yoksa da bcrypt.compare çalıştırılır ki yanıt süresi bilgi sızdırmasın. */
+    let isMatch = false;
+    if (user?.password) {
+      isMatch = await arePasswordMatch(password, user.password);
+    } else {
+      await arePasswordMatch(password, DUMMY_BCRYPT_HASH); // timing eşitleme
     }
 
-    // 3️⃣ Password null/empty ise Google ile kayıtlıdır
-    if (!user.password) {
-      return res.status(401).json({
-        error: 'Bu kullanıcı Google ile oluşturulmuştur. Lütfen Google ile giriş yapın.',
-      });
+    if (!isMatch) {
+      return res.status(401).json({ error: 'E-posta veya şifre hatalı.' });
     }
 
-    // 4️⃣ E-posta onayı kontrolü
+    // 4️⃣ E-posta onayı kontrolü (yalnızca şifre doğrulandıktan sonra)
     if (!user.isemailapproved) {
       return res.status(401).json({
         error: 'Hesabınız onaylanmamış. Lütfen e-posta adresinizi doğrulayın.',
       });
-    }
-
-    // 5️⃣ Şifre doğrulama
-    const isMatch = await arePasswordMatch(password, user.password);
-    if (!isMatch) {
-      return res.status(401).json({ error: 'Şifre yanlış.' });
     }
 
     // 6️⃣ Token oluştur
@@ -230,7 +268,7 @@ app.post('/login', async (req, res) => {
 // =======================================
 // 🔹 Kullanıcı Şifre Değiştirme Endpoint
 // =======================================
-app.post('/change-password', authenticateToken, async (req, res) => {
+app.post('/change-password', authLimiter, authenticateToken, async (req, res) => {
   try {
     const { current_password, new_password } = req.body;
 
@@ -238,8 +276,8 @@ app.post('/change-password', authenticateToken, async (req, res) => {
     if (!current_password || !new_password) {
       return res.status(400).json({ error: 'Mevcut ve yeni şifre zorunludur.' });
     }
-    if (new_password.length < 6) {
-      return res.status(400).json({ error: 'Yeni şifre en az 6 karakter olmalı.' });
+    if (typeof new_password !== 'string' || new_password.length < 8) {
+      return res.status(400).json({ error: 'Yeni şifre en az 8 karakter olmalı.' });
     }
     if (new_password === current_password) {
       return res.status(400).json({ error: 'Yeni şifre, mevcut şifreden farklı olmalı.' });
@@ -433,7 +471,7 @@ app.post('/update-profile', authenticateToken, async (req, res) => {
 // ===================================
 // 🔹 Kullanıcı Google Giriş Endpoint
 // ===================================
-app.post('/auth/google', async (req, res) => {
+app.post('/auth/google', authLimiter, async (req, res) => {
   const { idToken } = req.body;
 
   if (!idToken) return res.status(400).json({ error: 'idToken eksik' });
@@ -449,6 +487,13 @@ app.post('/auth/google', async (req, res) => {
     });
 
     const payload = ticket.getPayload();
+
+    /* Google'ın doğrulamadığı bir e-posta ile giriş kabul edilirse,
+       aynı e-postayla açılmış klasik (şifreli) hesap devralınabilir. */
+    if (payload.email_verified !== true) {
+      return res.status(401).json({ error: 'Google hesabınızın e-postası doğrulanmamış.' });
+    }
+
     const email = payload.email;
     const name = payload.name;
 
@@ -506,8 +551,8 @@ app.post('/auth/google', async (req, res) => {
       needs_profile: !hasProfile,
     });
   } catch (err) {
-    console.error('❌ Detaylı Google Giriş Hatası:', err.message); 
-    return res.status(401).json({ error: 'Giriş işlemi başarısız', details: err.message });
+    console.error('❌ Detaylı Google Giriş Hatası:', err.message);
+    return res.status(401).json({ error: 'Giriş işlemi başarısız' });
   }
 });
 
@@ -731,10 +776,7 @@ app.post('/products/image-search', authenticateToken, upload.single('image'), as
     if (error) {
       console.error('🐍 Python hatası:', error);
       console.error('🐍 STDERR:', stderr);
-      return res.status(500).json({
-        error: 'cc-ai.py çalıştırılamadı',
-        details: error.message,
-      });
+      return res.status(500).json({ error: 'Görsel işlenemedi.' });
     }
 
     console.log('✅ Python çıktısı alındı.');
@@ -786,10 +828,7 @@ app.post('/products/image-search', authenticateToken, upload.single('image'), as
     } catch (parseError) {
       console.error('❌ JSON parse hatası:', parseError);
       console.error('📤 stdout:', stdout);
-      return res.status(500).json({
-        error: 'cc-ai.py çıktısı JSON değil veya bozuk.',
-        stdout,
-      });
+      return res.status(500).json({ error: 'Görsel analizi başarısız oldu.' });
     } finally {
       fs.unlink(imagePath, () => {
         console.log('🧹 Geçici görsel silindi:', imagePath);
@@ -892,9 +931,9 @@ app.post('/send-feedback', authenticateTokenForFeedback, feedbackUpload.single('
     // 3️⃣ Görsel varsa doğru isimle yeniden adlandır
     let imageUrl = null;
     if (req.file) {
-      const timestamp = Date.now();
-      const extension = path.extname(req.file.originalname) || '.jpg';
-      const newFileName = `feedback_${feedbackId}-${userId}-${timestamp}${extension}`;
+      // Uzantı beyaz listeden, dosya adı tahmin edilemez olacak şekilde rastgele üretilir.
+      const extension = safeImageExtension(req.file.originalname);
+      const newFileName = `feedback_${feedbackId}-${userId}-${randomUUID()}${extension}`;
 
       // Eski path: user_uploads/feedback/feedback_173995xxx.jpg
       const oldPath = req.file.path;
@@ -921,11 +960,59 @@ app.post('/send-feedback', authenticateTokenForFeedback, feedbackUpload.single('
     });
   } catch (err) {
     console.error('❌ /send-feedback hatası:', err);
-    return res.status(500).json({ error: 'Sunucu hatası', details: err.message });
+    return res.status(500).json({ error: 'Sunucu hatası' });
   }
 });
 
 
+
+// ==============================================
+// 🔹 Feedback Görseli Servis Etme (sahiplik kontrollü)
+// ==============================================
+/* Eskiden bu klasör express.static ile herkese açıktı. Artık yalnızca görselin
+   sahibi kendi feedback'inin görselini görebiliyor. */
+app.get('/user_uploads/feedback/:filename', authenticateToken, async (req, res) => {
+  try {
+    const filename = path.basename(req.params.filename); // dizin geçişini engelle
+    const imageUrl = `/user_uploads/feedback/${filename}`;
+
+    const { rows } = await pool.query(
+      'SELECT id FROM user_feedback WHERE image_url = $1 AND user_id = $2 LIMIT 1',
+      [imageUrl, req.user.id]
+    );
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'Görsel bulunamadı.' });
+    }
+
+    const filePath = path.join(__dirname, 'user_uploads', 'feedback', filename);
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'Görsel bulunamadı.' });
+    }
+
+    // Tarayıcının dosyayı HTML/JS olarak yorumlamasını engelle
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
+    return res.sendFile(filePath);
+  } catch (err) {
+    console.error('❌ Feedback görseli servis hatası:', err);
+    return res.status(500).json({ error: 'Sunucu hatası' });
+  }
+});
+
+// ==============================================
+// 🔹 Merkezi Hata Yakalayıcı
+// ==============================================
+/* Multer'ın reddettiği dosyalar (uzantı/boyut) ve yakalanmamış hatalar buraya düşer.
+   İstemciye asla stack trace veya DB detayı gönderilmez. */
+// eslint-disable-next-line no-unused-vars
+app.use((err, req, res, _next) => {
+  if (err instanceof multer.MulterError || err?.message?.includes('yüklenebilir') || err?.message?.includes('uzantı')) {
+    console.warn('⚠️ Yükleme reddedildi:', err.message);
+    return res.status(400).json({ error: 'Dosya yüklenemedi. Yalnızca 10MB altındaki JPG/PNG/WEBP görseller kabul edilir.' });
+  }
+  console.error('❌ Beklenmeyen hata:', err);
+  return res.status(500).json({ error: 'Sunucu hatası' });
+});
 
 app.listen(PORT, () => {
   console.log(`✅ Sunucu ${PORT} portunda başarıyla başlatıldı ve istekleri dinliyor.`);

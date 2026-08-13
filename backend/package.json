@@ -13,24 +13,26 @@
     "cors": "^2.8.5",
     "dotenv": "^17.2.1",
     "express": "^5.1.0",
+    "express-rate-limit": "^7.4.1",
     "form-data": "^4.0.4",
     "google-auth-library": "^10.2.1",
+    "helmet": "^8.0.0",
     "hnswlib-node": "^3.0.0",
     "jsonwebtoken": "^9.0.2",
     "multer": "^2.0.2",
     "onnxruntime-node": "^1.22.0-rev",
     "sharp": "^0.34.3",
     "uuid": "^11.1.0",
-    "pg":"^8.16.3"
+    "pg": "^8.16.3"
   },
-  "description": "��#\u0000 \u0000R\u0000e\u0000s\u0000e\u0000t\u0000l\u0000e\u0000n\u0000m\u0000i\u0000_\u0001 \u0000r\u0000e\u0000p\u0000o\u0000\r\u0000 \u0000",
+  "description": "Clear Cart kullanıcı API'si: barkod okuma, görsel arama ve alerjen eşleştirme",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/talhaymn7/cc-user-backend.git"
   },
   "keywords": [],
   "author": "",
-  "license": "ISC",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "bugs": {
     "url": "https://github.com/talhaymn7/cc-user-backend/issues"
   },

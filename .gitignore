@@ -1,8 +1,32 @@
-# --- Kullanıcı İstekleri ---
+# --- Environment & Güvenlik (Çok Önemli!) ---
+.env
+.env.*
+!.env.example
+
+# RSA Anahtarları ve Sertifikalar (BUNLAR ASLA GİT'E GİTMEMELİ)
+*.pem
+*.key
+*.p12
+*.pfx
+*.keystore
+backend/keys/
+backend/client_keys/
+ad-b/keys/
+
 # Nginx şifre dosyası
 nginx/.htpasswd
 
-# Admin paneli ürün fotoğrafları (Klasör kalsın, içindekiler gitmesin istiyorsan)
+# --- Veritabanı yedekleri (kişisel veri içerir!) ---
+*.sql
+*.dump
+BackupFolder/
+Linux_Migration_Pack/
+db-tables.txt
+
+# --- Kullanıcı içeriği ---
+# Kullanıcıların yüklediği görseller ve feedbackler
+backend/user_uploads/
+# Admin paneli ürün fotoğrafları (Klasör kalsın, içindekiler gitmesin)
 ad-b/product-photos/*
 !ad-b/product-photos/.gitkeep
 
@@ -10,31 +34,12 @@ ad-b/product-photos/*
 node_modules/
 npm-debug.log
 yarn-error.log
-package-lock.json # (Opsiyonel: Genelde kalması önerilir ama bazen conflict yaratırsa silinebilir, şimdilik kalsın)
-
-# --- Environment & Güvenlik (Çok Önemli!) ---
-.env
-.env.production
-.env.local
-
-# --- Clear Cart Backend Özel ---
-# Kullanıcıların yüklediği görseller ve feedbackler
-backend/user_uploads/
-
-# RSA Anahtarları ve Sertifikalar (BUNLAR ASLA GİT'E GİTMEMELİ)
-backend/keys/
-backend/client_keys/
 
 # --- Python (AI scripti için oluşan gereksiz dosyalar) ---
 __pycache__/
 *.pyc
+venv/
 
 # --- İşletim Sistemi Dosyaları ---
 .DS_Store
 Thumbs.db
-
-#Backup
-BackupFolder/
-db-tables.txt
-migration.ps1
-migration.sh

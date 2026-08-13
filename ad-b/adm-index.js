@@ -5,6 +5,9 @@ import path, { resolve } from 'path';
 import { fileURLToPath } from 'url';
 import bcyrpt from 'bcrypt';
 import fs from 'fs';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
+import { randomUUID } from 'crypto';
 import { execFile } from 'child_process';
 import pkg from 'pg';
 import { SERVER_PUBLIC_KEY, signJWT, verifyJWT } from './security.js';
@@ -30,29 +33,33 @@ if (!fs.existsSync(productPhotoUploadsDir)) {
   console.log('📁 product-photos klasörü yoktu, oluşturuldu.');
 }
 
+app.use(helmet());
+
+// Nginx arkasında çalışıyoruz: istemcinin uydurduğu X-Forwarded-For'a değil,
+// yalnızca bir önceki proxy'nin eklediği değere güven.
+app.set('trust proxy', 1);
+
 // JSON verilerini işlemek için middleware
-app.use(express.json());
+app.use(express.json({ limit: '1mb' }));
 
-app.use('/product-photos', (req, res, next) => {
-    console.log(`📸 FOTOĞRAF İSTEĞİ GELDİ: ${req.url}`);
-    const fullPath = path.join(__dirname, 'product-photos', req.url);
-    // Dosya var mı kontrol et (Debug için)
-    if (!fs.existsSync(fullPath)) {
-        console.error(`❌ DOSYA BULUNAMADI: ${fullPath}`);
-    }
-    next();
-});
+// Ürün fotoğrafları herkese açık (katalog görselleri).
+// nosniff + attachment ile, klasöre bir şekilde HTML/SVG düşerse tarayıcıda çalıştırılamaz.
+const staticImageOptions = {
+    index: false,
+    dotfiles: 'deny',
+    setHeaders: (res) => {
+        res.setHeader('X-Content-Type-Options', 'nosniff');
+        res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
+    },
+};
 
-// 2. Dosyayı Sun
-app.use('/product-photos', express.static(path.join(__dirname, 'product-photos')));
-
-app.use('/user_uploads', express.static(path.join(__dirname, 'user_uploads')));
+app.use('/product-photos', express.static(path.join(__dirname, 'product-photos'), staticImageOptions));
 
 
 // ==========================================
 // 🛡️ Middleware: Admin Kimlik Doğrulama
 // ==========================================
-function authenticateAdmin(req, res, next) {
+async function authenticateAdmin(req, res, next) {
   /* Nginx tarafında 'Authorization' başlığı Basic Auth için kullanıldığından,
      JWT token'ı taşımak için özel 'x-auth-token' başlığını kullanıyoruz.
   */
@@ -66,8 +73,23 @@ function authenticateAdmin(req, res, next) {
     // 1. Token'ı doğrula (security.js)
     const user = verifyJWT(token);
 
-    // 2. Doğrulanan kullanıcı bilgisini request nesnesine ekle.
-    // Artık sonraki aşamalarda req.user.email diyerek erişebiliriz.
+    /* 2. İmzanın geçerli olması TEK BAŞINA yeterli değil.
+       Kullanıcı backend'i ile aynı anahtar çifti kullanılacak şekilde deploy edilirse,
+       sıradan bir kullanıcı token'ı da geçerli imzaya sahip olur. Bu yüzden token'ın
+       admin rolü taşıdığını ve hesabın adm_users'ta hâlâ var olduğunu doğruluyoruz. */
+    if (user.role !== 'admin') {
+      return res.status(403).json({ error: 'Bu işlem için yetkiniz yok.' });
+    }
+
+    const { rows } = await pool.query(
+      'SELECT id, email FROM adm_users WHERE id = $1 AND email = $2 LIMIT 1',
+      [user.id, user.email]
+    );
+    if (rows.length === 0) {
+      return res.status(403).json({ error: 'Bu işlem için yetkiniz yok.' });
+    }
+
+    // 3. Doğrulanan kullanıcı bilgisini request nesnesine ekle.
     req.user = user;
 
     next(); // Bir sonraki fonksiyona geç
@@ -95,8 +117,9 @@ const pool = new Pool({
 */
 async function logAdminAction(req, actionType, details) {
   try {
-    // IP adresini al (Proxy arkasındaysa x-forwarded-for, yoksa remoteAddress)
-    const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || null;
+    /* IP adresi: 'trust proxy' ayarlı olduğu için req.ip, istemcinin uydurabildiği
+       ham X-Forwarded-For yerine yalnızca güvenilen proxy'nin eklediği değeri verir. */
+    const ip = req.ip || req.socket.remoteAddress || null;
     const endpoint = req.originalUrl || req.url;
 
     // Email bulma mantığı
@@ -119,6 +142,10 @@ async function logAdminAction(req, actionType, details) {
 /*
    🔑 Şifreleme Yardımcı Fonksiyonları
 */
+/* Kullanıcı bulunamadığında da bcrypt.compare çalıştırıp yanıt süresini eşitlemek için
+   kullanılan sabit hash. Karşılığı olan bir şifre yok, hiçbir zaman eşleşmez. */
+const DUMMY_BCRYPT_HASH = '$2b$12$C6UzMDM.H6dfI/f/IKcEe.7PLXhVUAqTLNBVMPHZ5LWJcAf1kXTGa';
+
 async function hashpassword(password) {
   const saltRount = 12;
   const hashed = await bcyrpt.hash(password, saltRount);
@@ -136,6 +163,29 @@ async function arePassordsMatch(enteredPassword, dbPassword) {
 app.use((req, res, next) => {
   console.log(`📡 GELEN İSTEK: ${req.method} ${req.url}`);
   next();
+});
+
+// ==========================================
+// 🔒 Toplu Yetkilendirme
+// ==========================================
+/* /admin/v1 altındaki HER uç varsayılan olarak kimlik doğrulaması ister.
+   Daha önce yetkilendirme her endpoint'e tek tek ekleniyordu ve 11 tanesinde unutulmuştu
+   (içerik silme, fotoğraf silme ve kimliksiz dosya yükleme dahil). Beyaz liste yaklaşımı,
+   yeni eklenen bir ucun yanlışlıkla açıkta kalmasını imkânsız kılar. */
+const PUBLIC_ADMIN_PATHS = new Set(['/admin/v1/login']);
+
+const adminLoginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Çok fazla giriş denemesi. Lütfen bir süre sonra tekrar deneyin.' },
+});
+
+app.use('/admin/v1', (req, res, next) => {
+  const fullPath = req.baseUrl + req.path.replace(/\/$/, '');
+  if (PUBLIC_ADMIN_PATHS.has(fullPath)) return next();
+  return authenticateAdmin(req, res, next);
 });
 
 
@@ -161,7 +211,7 @@ app.use('/admin/v1/product-photos', express.static(path.join(__dirname, 'product
 /*
    👤 GİRİŞ İŞLEMLERİ (Login)
 */
-app.post('/admin/v1/login', async (req, res) => {
+app.post('/admin/v1/login', adminLoginLimiter, async (req, res) => {
   try {
     const { email, password } = req.body;
 
@@ -177,21 +227,23 @@ app.post('/admin/v1/login', async (req, res) => {
     );
     const user = rows[0];
 
-    // Kullanıcı yoksa
-    if (!user) {
-      await logAdminAction(req, 'LOGIN_FAILED', 'Kullanıcı bulunamadı: ' + email);
-      return res.status(404).json({ error: 'Kullanıcı bulunamadı.' });
+    /* Kullanıcının bulunamaması ile şifrenin yanlış olması AYNI cevabı döndürür,
+       aksi halde hangi admin e-postalarının geçerli olduğu dışarıdan öğrenilebilir.
+       Kullanıcı yoksa da bcrypt çalıştırılır ki yanıt süresi bilgi sızdırmasın. */
+    let isMatch = false;
+    if (user?.password) {
+      isMatch = await arePassordsMatch(password, user.password);
+    } else {
+      await arePassordsMatch(password, DUMMY_BCRYPT_HASH); // timing eşitleme
     }
 
-    // Şifre kontrolü
-    const isMatch = await arePassordsMatch(password, user.password);
     if (!isMatch) {
-      await logAdminAction(req, 'LOGIN_FAILED', 'Yanlış şifre denemesi.');
-      return res.status(401).json({ error: 'Şifre yanlış.' });
+      await logAdminAction(req, 'LOGIN_FAILED', `Başarısız giriş denemesi: ${email}`);
+      return res.status(401).json({ error: 'E-posta veya şifre hatalı.' });
     }
 
-    // Token oluştur
-    const token = signJWT({ email, id: user.id }, '1d');
+    // Token oluştur — rol bilgisi payload'a yazılır, authenticateAdmin bunu doğrular
+    const token = signJWT({ email, id: user.id, role: 'admin' }, '1d');
     const isJWTtrue = verifyJWT(token);
 
     if (isJWTtrue) {
@@ -253,7 +305,7 @@ app.post('/admin/v1/change-password', authenticateAdmin, async (req, res) => {
     await pool.query('UPDATE adm_users SET password = $1 WHERE email = $2', [hashedPassword, email]);
 
     // Güvenlik için token'ı yenile
-    const newToken = signJWT({ email, id: user.id }, '7d');
+    const newToken = signJWT({ email, id: user.id, role: 'admin' }, '1d');
     await pool.query('UPDATE adm_users SET jwt_token = $1 WHERE email = $2', [newToken, email]);
 
     await logAdminAction(req, 'RESET_PASSWORD', 'Şifre değiştirildi.');
@@ -385,25 +437,70 @@ app.delete('/admin/v1/allergens/:id/delete', authenticateAdmin, async (req, res)
    🛍️ ÜRÜN İŞLEMLERİ (Fotoğraflı ve Fotoğrafsız)
 */
 
+// ==========================================
+// 📸 Fotoğraf Yükleme Güvenlik Yardımcıları
+// ==========================================
+const PRODUCT_PHOTO_DIR = path.join(__dirname, "product-photos");
+const ALLOWED_IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp'];
+
+/* Ürün ID'si dosya adına giriyor. Doğrulanmazsa `..%2F..%2F` içeren bir istek
+   path.join sonucunu product-photos dizininin dışına taşır; cc-ai.py gibi
+   çalıştırılan bir dosyanın üzerine yazılabilirse uzaktan kod çalıştırmaya dönüşür.
+   Bu yüzden ID yalnızca rakamlardan oluşacak şekilde zorlanıyor. */
+function safeProductId(rawId) {
+  const digits = String(rawId ?? '').replace(/[^0-9]/g, '');
+  return digits.length > 0 ? digits : null;
+}
+
+// Uzantı beyaz listeden seçilir; originalname'e asla güvenilmez.
+function safeImageExtension(originalName) {
+  const ext = path.extname(originalName || '').toLowerCase();
+  return ALLOWED_IMAGE_EXTENSIONS.includes(ext) ? ext : '.jpg';
+}
+
+/* İkinci savunma katmanı: üretilen yolun gerçekten product-photos altında
+   kaldığını path.resolve ile doğrula. */
+function resolveProductPhotoPath(fileName) {
+  const target = path.resolve(PRODUCT_PHOTO_DIR, fileName);
+  const root = path.resolve(PRODUCT_PHOTO_DIR) + path.sep;
+  if (!target.startsWith(root)) {
+    throw new Error(`Geçersiz dosya yolu reddedildi: ${fileName}`);
+  }
+  return target;
+}
+
+// Ürün fotoğrafını güvenli adla product-photos altına taşır, yeni dosya adını döndürür.
+function storeProductPhoto(file, productId) {
+  const fileName = `${productId}_${randomUUID()}${safeImageExtension(file.originalname)}`;
+  fs.renameSync(file.path, resolveProductPhotoPath(fileName));
+  return fileName;
+}
+
 // Multer Ayarları (Fotoğraf yükleme için)
 const productStorage = multer.diskStorage({
   destination: (req, file, cb) => {
-    const dir = path.join(__dirname, "product-photos");
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    cb(null, dir);
+    if (!fs.existsSync(PRODUCT_PHOTO_DIR)) fs.mkdirSync(PRODUCT_PHOTO_DIR, { recursive: true });
+    cb(null, PRODUCT_PHOTO_DIR);
   },
   filename: (req, file, cb) => {
-    // ID henüz belli olmayabilir, geçici isim verip sonra düzelteceğiz
-    const productId = req.body.product_id || req.params.id || "temp";
-    const ext = path.extname(file.originalname);
-    const randomSuffix = Math.floor(Math.random() * 10000);
-    cb(null, `${productId}_${randomSuffix}${ext}`);
+    /* Geçici ad tamamen rastgele: req.params/req.body'den gelen hiçbir değer
+       dosya adına karışmaz. Doğru ad, ürün ID'si kesinleştikten sonra verilir. */
+    cb(null, `upload_${randomUUID()}${safeImageExtension(file.originalname)}`);
   },
 });
 
 const uploadProductPhotos = multer({
   storage: productStorage,
-  limits: { files: 10 }, // Maksimum 10 fotoğraf
+  fileFilter: (req, file, cb) => {
+    if (!file.mimetype.startsWith('image/')) {
+      return cb(new Error('Yalnızca görsel yüklenebilir.'));
+    }
+    if (!ALLOWED_IMAGE_EXTENSIONS.includes(path.extname(file.originalname).toLowerCase())) {
+      return cb(new Error('Desteklenmeyen dosya uzantısı.'));
+    }
+    cb(null, true);
+  },
+  limits: { files: 10, fileSize: 10 * 1024 * 1024 }, // Maksimum 10 fotoğraf, her biri 10MB
 });
 
 app.get('/admin/v1/products/list-products', authenticateAdmin, async (req, res) => {
@@ -470,13 +567,7 @@ app.post('/admin/v1/products/add-with-photo', authenticateAdmin, uploadProductPh
     // 3️⃣ Fotoğrafları doğru ID ile yeniden adlandır
     const photoPaths = [];
     for (const file of photos) {
-      const ext = path.extname(file.originalname);
-      const randomSuffix = Math.floor(Math.random() * 10000);
-      const newFileName = `${newId}_${randomSuffix}${ext}`;
-      const newPath = path.join(__dirname, "product-photos", newFileName);
-
-      fs.renameSync(file.path, newPath);
-      photoPaths.push(newPath);
+      photoPaths.push(resolveProductPhotoPath(storeProductPhoto(file, newId)));
     }
 
     await logAdminAction(req, 'ADD_PRODUCT_WITH_PHOTO', `Ürün ID: ${newId} - Foto Sayısı: ${photos.length}`);
@@ -632,8 +723,12 @@ app.put('/admin/v1/products/:id/edit', authenticateAdmin, async (req, res) => {
 
 // 📸✏️ FOTOĞRAFLI Ürün Güncelleme (AI Analizi Dahil)
 app.put('/admin/v1/products/:id/update-with-photo', authenticateAdmin, uploadProductPhotos.array("photos", 10), async (req, res) => {
-  const client = await pool.connect(); 
-  const productId = req.params.id;
+  const productId = safeProductId(req.params.id);
+  if (!productId) {
+    return res.status(400).json({ error: 'Geçersiz ürün ID.' });
+  }
+
+  const client = await pool.connect();
   const { name, brand, description, barcode } = req.body;
   const photos = req.files;
 
@@ -654,13 +749,7 @@ app.put('/admin/v1/products/:id/update-with-photo', authenticateAdmin, uploadPro
     // 2️⃣ Fotoğrafları Klasöre Taşı (Bu işlem çok hızlıdır)
     const photoPaths = [];
     for (const file of photos) {
-      const ext = path.extname(file.originalname);
-      const randomSuffix = Math.floor(Math.random() * 10000);
-      const newFileName = `${productId}_${randomSuffix}${ext}`;
-      const newPath = path.join(__dirname, "product-photos", newFileName);
-
-      fs.renameSync(file.path, newPath);
-      photoPaths.push(newPath);
+      photoPaths.push(resolveProductPhotoPath(storeProductPhoto(file, productId)));
     }
 
     // 🔥 KRİTİK NOKTA: Kullanıcıyı bekletme, hemen cevap ver!
@@ -853,6 +942,30 @@ app.get('/admin/v1/feedbacks/list', authenticateAdmin, async (req, res) => {
   } catch (e) {
     console.error('❌ Feedback listeleme hatası:', e);
     await logAdminAction(req, 'LIST_FEEDBACK_ERROR', e.message);
+    return res.status(500).json({ error: 'Sunucu hatası.' });
+  }
+});
+
+// ==========================================
+// 🖼️ FEEDBACK GÖRSELİ (yetkili erişim)
+// ==========================================
+/* Kullanıcı görselleri artık statik olarak sunulmuyor. Admin bu uçtan erişir;
+   /admin/v1 altında olduğu için toplu yetkilendirmeden geçer. */
+app.get('/admin/v1/feedbacks/image/:filename', async (req, res) => {
+  try {
+    const filename = path.basename(req.params.filename); // dizin geçişini engelle
+    const feedbackDir = path.resolve(__dirname, 'user_uploads', 'feedback');
+    const filePath = path.resolve(feedbackDir, filename);
+
+    if (!filePath.startsWith(feedbackDir + path.sep) || !fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'Görsel bulunamadı.' });
+    }
+
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
+    return res.sendFile(filePath);
+  } catch (e) {
+    console.error('❌ Feedback görseli servis hatası:', e);
     return res.status(500).json({ error: 'Sunucu hatası.' });
   }
 });
@@ -1151,8 +1264,11 @@ app.delete('/admin/v1/ingredients/:id/delete', async (req, res) => {
 
 // 1. Ürüne ait fotoğrafları listele
 app.get('/admin/v1/products/:id/photos', (req, res) => {
-  const productId = req.params.id;
-  const dir = path.join(__dirname, 'product-photos');
+  const productId = safeProductId(req.params.id);
+  if (!productId) {
+    return res.status(400).json({ error: 'Geçersiz ürün ID.' });
+  }
+  const dir = PRODUCT_PHOTO_DIR;
 
   fs.readdir(dir, (err, files) => {
     if (err) {
@@ -1176,13 +1292,20 @@ app.delete('/admin/v1/products/photos/delete', (req, res) => {
 
   if (!photoName) return res.status(400).json({ error: 'Dosya adı gerekli.' });
 
-  // Güvenlik: Sadece dosya adı olduğundan emin ol (dizin geçişi engelleme)
-  const safeName = path.basename(photoName);
-  const filePath = path.join(__dirname, 'product-photos', safeName);
+  // Güvenlik: Sadece dosya adı olduğundan emin ol (dizin geçişi engelleme),
+  // ardından çözülen yolun product-photos altında kaldığını doğrula.
+  let filePath;
+  try {
+    filePath = resolveProductPhotoPath(path.basename(photoName));
+  } catch (e) {
+    console.warn('⚠️', e.message);
+    return res.status(400).json({ error: 'Geçersiz dosya adı.' });
+  }
 
   if (fs.existsSync(filePath)) {
-    fs.unlink(filePath, (err) => {
+    fs.unlink(filePath, async (err) => {
       if (err) return res.status(500).json({ error: 'Silme hatası.' });
+      await logAdminAction(req, 'DELETE_PRODUCT_PHOTO', `Silinen: ${path.basename(photoName)}`);
       res.json({ success: true, message: 'Fotoğraf silindi.' });
     });
   } else {
@@ -1192,23 +1315,23 @@ app.delete('/admin/v1/products/photos/delete', (req, res) => {
 
 // 3. Mevcut Ürüne Yeni Fotoğraf Ekleme
 app.post("/admin/v1/products/:id/add-photo", uploadProductPhotos.array("photos", 5), async (req, res) => {
-    const productId = req.params.id;
-    const photos = req.files;
+    const productId = safeProductId(req.params.id);
+    if (!productId) {
+        return res.status(400).json({ error: "Geçersiz ürün ID." });
+    }
 
+    const photos = req.files;
     if (!photos || photos.length === 0) {
         return res.status(400).json({ error: "Fotoğraf yüklenmedi." });
     }
 
-    // Dosyaları isimlendir
+    // Dosyaları güvenli adla isimlendir
     for (const file of photos) {
-        const ext = path.extname(file.originalname);
-        const randomSuffix = Math.floor(Math.random() * 10000);
-        const newFileName = `${productId}_${randomSuffix}${ext}`;
-        const newPath = path.join(__dirname, "product-photos", newFileName);
-        
-        fs.renameSync(file.path, newPath);
+        storeProductPhoto(file, productId);
     }
-    
+
+    await logAdminAction(req, 'ADD_PRODUCT_PHOTO', `Ürün ID: ${productId} - ${photos.length} foto`);
+
     // Not: Burada Python scripti (embedding) tekrar çalıştırılabilir ama
     // şimdilik sadece galeriye ekliyoruz.
     res.json({ success: true, message: `${photos.length} fotoğraf eklendi.` });
@@ -1242,6 +1365,21 @@ app.delete('/admin/v1/products/:id/delete', authenticateAdmin, async (req, res) 
   }
 });
 
+
+// ==========================================
+// 🧯 Merkezi Hata Yakalayıcı
+// ==========================================
+/* Multer'ın reddettiği dosyalar (uzantı/boyut) ve yakalanmamış hatalar buraya düşer.
+   İstemciye asla stack trace veya DB detayı gönderilmez. */
+// eslint-disable-next-line no-unused-vars
+app.use((err, req, res, _next) => {
+  if (err instanceof multer.MulterError || err?.message?.includes('yüklenebilir') || err?.message?.includes('uzantı')) {
+    console.warn('⚠️ Yükleme reddedildi:', err.message);
+    return res.status(400).json({ error: 'Dosya yüklenemedi. Yalnızca 10MB altındaki JPG/PNG/WEBP görseller kabul edilir.' });
+  }
+  console.error('❌ Beklenmeyen hata:', err);
+  return res.status(500).json({ error: 'Sunucu hatası' });
+});
 
 // Sunucuyu Dinle
 app.listen(PORT, '0.0.0.0', () => {

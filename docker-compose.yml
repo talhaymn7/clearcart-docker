@@ -1,3 +1,10 @@
+# ============================================================
+# Clear Cart — Docker Compose
+#
+# Tüm gizli değerler .env dosyasından okunur (bkz. .env.example).
+# Bu dosyaya ASLA düz metin şifre/token yazmayın.
+# ============================================================
+
 services:
   # 🐘 PostgreSQL
   postgres:
@@ -5,13 +12,18 @@ services:
     container_name: clearcart-db
     restart: unless-stopped
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: REMOVED-DB-PASSWORD
-      POSTGRES_DB: clearcart
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
+    # ⚠️ Veritabanı yalnızca docker ağı içinden erişilebilir.
+    # Host'tan psql ile bağlanmak için bu satırları geçici olarak açın:
+    #   ports:
+    #     - "127.0.0.1:5432:5432"
+    # (0.0.0.0'a açmayın — veritabanını internete açar.)
+    expose:
+      - "5432"
 
   # 🚀 Clear Cart Backend
   backend:
@@ -25,10 +37,10 @@ services:
       - ./backend/user_uploads:/app/user_uploads     # Feedback ve görseller
     environment:
       - NODE_ENV=production
-      - DATABASE_URL=postgresql://postgres:REMOVED-DB-PASSWORD@postgres:5432/clearcart
-      - JWT_SECRET=REMOVED-JWT-SECRET
-      - ANDROID_CLIENT_ID_FOR_GOOGLE=432849675027-gfnrj2onvvqii8nun2n3kc4evcq0riqd.apps.googleusercontent.com
-      - GOOGLE_CLIENT_ID=452101464013-ci3g1qrbpp2d38rhn7moga06geg1ma1j.apps.googleusercontent.com
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      - JWT_SECRET=${JWT_SECRET}
+      - ANDROID_CLIENT_ID_FOR_GOOGLE=${ANDROID_CLIENT_ID_FOR_GOOGLE}
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
       - PORT=7860
       - JWT_PRIVATE_KEY_PATH=/app/keys/private.pem
       - JWT_PUBLIC_KEY_PATH=/app/keys/public.pem
@@ -47,8 +59,11 @@ services:
     - ./backend/user_uploads:/app/user_uploads
     environment:
       - NODE_ENV=production
-      - DATABASE_URL=postgresql://postgres:REMOVED-DB-PASSWORD@postgres:5432/clearcart
-      - JWT_SECRET=REMOVED-JWT-SECRET
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      - JWT_SECRET=${JWT_SECRET}
+      # ⚠️ Admin servisi KENDİ anahtar çiftini kullanır (imaj build'inde üretilir).
+      # backend/keys buraya mount EDİLMEMELİDİR — aynı anahtar paylaşılırsa
+      # sıradan bir kullanıcı token'ı admin uçlarında da geçerli imzaya sahip olur.
       - JWT_PRIVATE_KEY_PATH=/app/keys/private.pem
       - JWT_PUBLIC_KEY_PATH=/app/keys/public.pem
       - CLIENT_KEYS_DIR=/app/keys/client_keys
@@ -58,7 +73,7 @@ services:
     restart: unless-stopped
 
    # 🚇 NGROK Tunnel (backend'e tünel açar)
- 
+
   ngrok:
     image: ngrok/ngrok:latest
     container_name: clearcart-ngrok
@@ -66,7 +81,7 @@ services:
       - backend
       - nginx # Nginx'i de buraya ekleyelim, çünkü tünel Nginx'e gidiyor.
     environment:
-      - NGROK_AUTHTOKEN=REMOVED-NGROK-TOKEN
+      - NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN}
     command: ["http", "clearcart-nginx:80"] # Tünel Nginx Reverse Proxy'ye gidiyor
     restart: unless-stopped
 
@@ -81,7 +96,7 @@ services:
       - "80:80"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
-      - ./nginx/.htpasswd:/etc/nginx/conf.d/.htpasswd:rw
+      - ./nginx/.htpasswd:/etc/nginx/conf.d/.htpasswd:ro
     restart: unless-stopped
 
 volumes:
