@@ -7,22 +7,15 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.57.4",
-    "axios": "^1.11.0",
     "bcrypt": "^6.0.0",
-    "cors": "^2.8.5",
     "dotenv": "^17.2.1",
     "express": "^5.1.0",
     "express-rate-limit": "^7.4.1",
-    "form-data": "^4.0.4",
     "google-auth-library": "^10.2.1",
     "helmet": "^8.0.0",
     "hnswlib-node": "^3.0.0",
     "jsonwebtoken": "^9.0.2",
     "multer": "^2.0.2",
-    "onnxruntime-node": "^1.22.0-rev",
-    "sharp": "^0.34.3",
-    "uuid": "^11.1.0",
     "pg": "^8.16.3"
   },
   "description": "Clear Cart kullanıcı API'si: barkod okuma, görsel arama ve alerjen eşleştirme",
