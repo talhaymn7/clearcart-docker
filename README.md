@@ -2,10 +2,10 @@
 
 # 🛒 Clear Cart
 
-**Ürünün fotoğrafını çek — içindeki alerjeni saniyeler içinde öğren.**
+**Take a photo of a product — find out what allergens are in it within seconds.**
 
-Barkod okuma ve görsel benzerlik aramasını birleştirerek market ürünlerini tanıyan,
-kullanıcının alerjen profiliyle eşleştiren Docker tabanlı backend sistemi.
+A Docker-based backend system that recognizes grocery products by combining barcode
+scanning with visual similarity search, then matches them against the user's allergen profile.
 
 [![License: PolyForm Noncommercial](https://img.shields.io/badge/License-PolyForm_Noncommercial_1.0.0-orange.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/Node.js-20-339933?logo=node.js&logoColor=white)](https://nodejs.org)
@@ -18,29 +18,29 @@ kullanıcının alerjen profiliyle eşleştiren Docker tabanlı backend sistemi.
 
 ---
 
-## Ne yapar?
+## What it does
 
-Gıda alerjisi olan biri için market alışverişi, her ürünün arkasındaki küçük puntolu içerik
-listesini tek tek okumak demektir. Clear Cart bu adımı ortadan kaldırır:
+For someone with a food allergy, grocery shopping means reading the fine-print ingredient
+list on the back of every single product. Clear Cart removes that step:
 
-1. Kullanıcı ürünün fotoğrafını çeker.
-2. Sistem **barkodu okumayı** dener — barkod okunursa eşleşme kesindir.
-3. Barkod yoksa veya okunamazsa **görsel benzerlik** devreye girer: fotoğraftan çıkarılan
-   1000 boyutlu gömme vektörü (EfficientNet-B4), ortalama RGB ve renk histogramı, katalogdaki
-   ürünlerle pgvector üzerinden karşılaştırılır.
-4. Eşleşen ürünün içerik listesi, kullanıcının **kendi alerjen profiliyle** kesiştirilir.
-5. Sonuç: "Bu üründe FINDIK var" — ya da temiz.
+1. The user takes a photo of the product.
+2. The system first tries to **read the barcode** — if it scans, the match is exact.
+3. If there is no barcode or it can't be read, **visual similarity** takes over: a
+   1000-dimensional embedding vector (EfficientNet-B4), the mean RGB value and a color
+   histogram are extracted from the photo and compared against the catalog via pgvector.
+4. The matched product's ingredient list is intersected with the user's **own allergen profile**.
+5. The result: "This product contains HAZELNUTS" — or it's clean.
 
-## Mimari
+## Architecture
 
 ```mermaid
 flowchart TB
-    Client["📱 Mobil İstemci<br/>(Flutter)"]
+    Client["📱 Mobile Client<br/>(Flutter)"]
 
-    subgraph Docker["🐳 Docker Compose Ağı"]
+    subgraph Docker["🐳 Docker Compose Network"]
         Nginx["🌐 Nginx :80<br/>reverse proxy + Basic Auth"]
-        Backend["🚀 Backend :7860<br/>kullanıcı API'si"]
-        Admin["🛠️ Admin Backend :10031<br/>katalog yönetimi"]
+        Backend["🚀 Backend :7860<br/>user API"]
+        Admin["🛠️ Admin Backend :10031<br/>catalog management"]
         DB[("🐘 PostgreSQL<br/>+ pgvector")]
         AI["🐍 cc-ai.py<br/>ONNX / OpenCV / pyzbar"]
     end
@@ -61,103 +61,103 @@ flowchart TB
     style AI fill:#3776AB,stroke:#234B6E,color:#fff
 ```
 
-### Görsel işleme hattı
+### Image processing pipeline
 
 ```mermaid
 flowchart LR
-    A["📷 Ham görsel"] --> B["EXIF<br/>yön düzeltme"]
-    B --> C["pyzbar<br/>barkod tarama"]
-    C --> D["rembg<br/>arka plan kaldırma"]
-    D --> E["Ortalama RGB<br/>+ histogram"]
-    D --> F["EfficientNet-B4<br/>ONNX gömme"]
-    E --> G["🔍 pgvector<br/>benzerlik araması"]
+    A["📷 Raw image"] --> B["EXIF<br/>orientation fix"]
+    B --> C["pyzbar<br/>barcode scan"]
+    C --> D["rembg<br/>background removal"]
+    D --> E["Mean RGB<br/>+ histogram"]
+    D --> F["EfficientNet-B4<br/>ONNX embedding"]
+    E --> G["🔍 pgvector<br/>similarity search"]
     F --> G
-    C -.->|"barkod bulunduysa<br/>doğrudan eşleşme"| H["✅ Ürün"]
+    C -.->|"barcode found:<br/>direct match"| H["✅ Product"]
     G --> H
 ```
 
-### Servisler
+### Services
 
-| Servis | Konteyner | Port | Görev |
+| Service | Container | Port | Role |
 |---|---|---|---|
-| Backend | `clearcart-backend` | 7860 | Kayıt/giriş, alerjen tercihleri, görsel arama |
-| Admin Backend | `clearcart-admin-backend` | 10031 | Ürün, içerik ve alerjen yönetimi |
-| PostgreSQL | `clearcart-db` | 5432 | pgvector eklentili veritabanı |
-| Nginx | `clearcart-nginx` | 80 | Reverse proxy + admin için Basic Auth |
-| NGROK | `clearcart-ngrok` | — | Geliştirme sırasında dışarıya tünel |
+| Backend | `clearcart-backend` | 7860 | Sign-up/sign-in, allergen preferences, visual search |
+| Admin Backend | `clearcart-admin-backend` | 10031 | Product, ingredient and allergen management |
+| PostgreSQL | `clearcart-db` | 5432 | Database with the pgvector extension |
+| Nginx | `clearcart-nginx` | 80 | Reverse proxy + Basic Auth for admin |
+| NGROK | `clearcart-ngrok` | — | Outbound tunnel during development |
 
-**Teknolojiler:** Node.js 20 (ES modules) · Express · PostgreSQL + pgvector · Python (ONNX Runtime, OpenCV, rembg, pyzbar) · EfficientNet-B4 · JWT (RS256) · bcrypt · Docker Compose
+**Stack:** Node.js 20 (ES modules) · Express · PostgreSQL + pgvector · Python (ONNX Runtime, OpenCV, rembg, pyzbar) · EfficientNet-B4 · JWT (RS256) · bcrypt · Docker Compose
 
 ---
 
-## Hızlı başlangıç
+## Quick start
 
 ```bash
 git clone https://github.com/talhaymn7/clearcart-docker.git
 cd clearcart-docker
 
-# 1) Ortam değişkenleri
+# 1) Environment variables
 cp .env.example .env
-openssl rand -base64 24   # POSTGRES_PASSWORD için
-openssl rand -hex 64      # JWT_SECRET için
+openssl rand -base64 24   # for POSTGRES_PASSWORD
+openssl rand -hex 64      # for JWT_SECRET
 
-# 2) Admin paneli Basic Auth kullanıcısı
+# 2) Basic Auth user for the admin panel
 htpasswd -B -c nginx/.htpasswd admin
 
-# 3) Ayağa kaldır (şema ilk açılışta otomatik uygulanır)
+# 3) Bring it up (the schema is applied automatically on first start)
 docker compose up -d --build
 curl http://localhost/health     # -> ok
 ```
 
-NGROK tüneli isterseniz ayrı bir profille açılır:
+If you want the NGROK tunnel, it starts under a separate profile:
 
 ```bash
 docker compose --profile ngrok up -d
 ```
 
 <details>
-<summary><b>Ayrıntılı kurulum</b></summary>
+<summary><b>Detailed setup</b></summary>
 
-### Gereksinimler
-- Docker ve Docker Compose
-- `openssl` ve `htpasswd` (apache2-utils)
+### Requirements
+- Docker and Docker Compose
+- `openssl` and `htpasswd` (apache2-utils)
 
-### Ortam değişkenleri
+### Environment variables
 
-`.env.example` dosyasını `.env` olarak kopyalayıp doldurun. Google OAuth kullanacaksanız
-`GOOGLE_CLIENT_ID` ve `ANDROID_CLIENT_ID_FOR_GOOGLE` değerlerini Google Cloud Console →
-Credentials üzerinden alın. NGROK tüneli istiyorsanız
-[ngrok dashboard](https://dashboard.ngrok.com/get-started/your-authtoken)'dan token alın.
+Copy `.env.example` to `.env` and fill it in. If you plan to use Google OAuth, get the
+`GOOGLE_CLIENT_ID` and `ANDROID_CLIENT_ID_FOR_GOOGLE` values from Google Cloud Console →
+Credentials. For the NGROK tunnel, grab a token from the
+[ngrok dashboard](https://dashboard.ngrok.com/get-started/your-authtoken).
 
-### Basic Auth kullanıcıları
+### Basic Auth users
 
 ```bash
-htpasswd -B -c nginx/.htpasswd admin          # ilk kullanıcı (-c dosyayı oluşturur)
-htpasswd -B nginx/.htpasswd ikinci_kullanici  # sonrakiler (-c OLMADAN)
+htpasswd -B -c nginx/.htpasswd admin        # first user (-c creates the file)
+htpasswd -B nginx/.htpasswd second_user     # any further users (WITHOUT -c)
 ```
 
-> `-B` bcrypt kullanır. Varsayılan `-m` (MD5) modern donanımda hızlıca kırılır, kullanmayın.
+> `-B` uses bcrypt. The default `-m` (MD5) is cracked quickly on modern hardware — don't use it.
 
-### Admin hesabı
+### Admin account
 
 ```bash
 cd ad-b && python create-passwd-for-backend.py
 ```
 
-Üretilen hash'i veritabanına ekleyin:
+Insert the generated hash into the database:
 
 ```sql
 INSERT INTO adm_users (email, password) VALUES ('admin@example.com', '<hash>');
 ```
 
-### Veritabanı şifresi hakkında
+### About the database password
 
-`.env` içindeki `POSTGRES_PASSWORD` yalnızca veritabanı **ilk kez** oluşturulurken uygulanır.
-Mevcut bir `postgres_data` volume'ünüz varsa şifre eskisi olarak kalır:
+`POSTGRES_PASSWORD` in `.env` is only applied when the database is created for the **first**
+time. If you already have a `postgres_data` volume, the old password stays in effect:
 
 ```sql
 -- docker exec -it clearcart-db psql -U postgres -d clearcart
-ALTER USER postgres WITH PASSWORD 'yeni_sifre';
+ALTER USER postgres WITH PASSWORD 'new_password';
 ```
 
 </details>
@@ -166,156 +166,161 @@ ALTER USER postgres WITH PASSWORD 'yeni_sifre';
 
 ## API
 
-### Kullanıcı API'si (`:7860`)
+### User API (`:7860`)
 
-| Metot | Uç | Auth | Açıklama |
+| Method | Endpoint | Auth | Description |
 |---|---|:--:|---|
-| `GET` | `/` | — | Sağlık kontrolü |
-| `GET` | `/auth/public-key` | — | JWT doğrulama için public key |
-| `POST` | `/register` | — | Kayıt |
-| `POST` | `/login` | — | Giriş |
-| `POST` | `/auth/google` | — | Google ile giriş |
-| `PATCH` | `/refresh-token` | 🔑 | Token yenileme |
-| `POST` | `/change-password` | 🔑 | Şifre değiştirme |
-| `POST` | `/update-profile` | 🔑 | Profil güncelleme |
-| `GET` | `/my-informations` | 🔑 | Profil bilgileri |
-| `GET` | `/list-all-allergens` | — | Tüm alerjenler |
-| `GET` | `/search-allergens?q=` | — | Alerjen arama |
-| `GET` | `/list-user-allergens` | 🔑 | Kullanıcının alerjenleri |
-| `POST` | `/update-allergens` | 🔑 | Alerjen tercihlerini güncelle |
-| `POST` | `/products/image-search` | 🔑 | **Görselden ürün arama** |
-| `GET` | `/products/:id/full-info` | 🔑 | Ürün içeriği + alerjen eşleşmesi |
-| `POST` | `/send-feedback` | 🔑 | Geri bildirim (görsel ekli) |
+| `GET` | `/` | — | Health check |
+| `GET` | `/auth/public-key` | — | Public key for JWT verification |
+| `POST` | `/register` | — | Sign up |
+| `POST` | `/login` | — | Sign in |
+| `POST` | `/auth/google` | — | Sign in with Google |
+| `PATCH` | `/refresh-token` | 🔑 | Refresh token |
+| `POST` | `/change-password` | 🔑 | Change password |
+| `POST` | `/update-profile` | 🔑 | Update profile |
+| `GET` | `/my-informations` | 🔑 | Profile details |
+| `GET` | `/list-all-allergens` | — | All allergens |
+| `GET` | `/search-allergens?q=` | — | Search allergens |
+| `GET` | `/list-user-allergens` | 🔑 | The user's allergens |
+| `POST` | `/update-allergens` | 🔑 | Update allergen preferences |
+| `POST` | `/products/image-search` | 🔑 | **Product search by image** |
+| `GET` | `/products/:id/full-info` | 🔑 | Ingredients + allergen matches |
+| `POST` | `/send-feedback` | 🔑 | Feedback (with image attachment) |
 
-### Admin API'si (`:10031`, `/admin/v1`)
+### Admin API (`:10031`, `/admin/v1`)
 
-Yalnızca `/admin/v1/login` açıktır; **diğer tüm uçlar** kimlik doğrulaması ister
-(`x-auth-token` başlığı) ve ayrıca Nginx Basic Auth'un arkasındadır.
+Only `/admin/v1/login` is open; **every other endpoint** requires authentication
+(`x-auth-token` header) and additionally sits behind Nginx Basic Auth.
 
 <details>
-<summary><b>Admin uçlarının tam listesi</b></summary>
+<summary><b>Full list of admin endpoints</b></summary>
 
-| Metot | Uç | Açıklama |
+| Method | Endpoint | Description |
 |---|---|---|
-| `POST` | `/admin/v1/login` | Admin girişi |
-| `POST` | `/admin/v1/change-password` | Şifre değiştirme |
-| `GET` | `/admin/v1/dashboard/stats` | Özet istatistikler |
-| `GET` | `/admin/v1/products/list-products` | Ürün listesi |
-| `POST` | `/admin/v1/products/add-without-photo` | Fotoğrafsız ürün ekleme |
-| `POST` | `/admin/v1/products/add-with-photo` | Fotoğraflı ürün ekleme + AI analizi |
-| `GET` | `/admin/v1/products/:id/view` | Ürün detayı |
-| `PUT` | `/admin/v1/products/:id/edit` | Ürün güncelleme |
-| `PUT` | `/admin/v1/products/:id/update-with-photo` | Fotoğraflı güncelleme + AI |
-| `DELETE` | `/admin/v1/products/:id/delete` | Ürün silme |
-| `GET` | `/admin/v1/products/:id/photos` | Ürün fotoğrafları |
-| `POST` | `/admin/v1/products/:id/add-photo` | Fotoğraf ekleme |
-| `DELETE` | `/admin/v1/products/photos/delete` | Fotoğraf silme |
-| `GET` | `/admin/v1/products/:id/relations` | Ürün içerik ilişkileri |
-| `POST` | `/admin/v1/products/:id/relations` | İlişkileri güncelle |
-| `GET` | `/admin/v1/products/:id/ingredients` | İçerik listesi + seçim durumu |
-| `POST` | `/admin/v1/products/:id/update-ingredients` | İçerikleri güncelle |
-| `GET` | `/admin/v1/ingredients/search?q=` | İçerik arama |
-| `POST` | `/admin/v1/ingredients/add` | İçerik ekleme |
-| `PUT` | `/admin/v1/ingredients/:id/edit` | İçerik güncelleme |
-| `DELETE` | `/admin/v1/ingredients/:id/delete` | İçerik silme |
-| `GET` | `/admin/v1/allergens/list-all-allergens` | Alerjen listesi |
-| `GET` | `/admin/v1/allergens/search-allergens?q=` | Alerjen arama |
-| `POST` | `/admin/v1/allergens/add-allergen` | Alerjen ekleme |
-| `GET` | `/admin/v1/allergens/:id/full-info` | Alerjen detayı |
-| `PUT` | `/admin/v1/allergens/:id/edit` | Alerjen güncelleme |
-| `DELETE` | `/admin/v1/allergens/:id/delete` | Alerjen silme |
-| `GET` | `/admin/v1/feedbacks/list` | Geri bildirimler |
-| `GET` | `/admin/v1/feedbacks/image/:filename` | Geri bildirim görseli |
+| `POST` | `/admin/v1/login` | Admin sign-in |
+| `POST` | `/admin/v1/change-password` | Change password |
+| `GET` | `/admin/v1/dashboard/stats` | Summary statistics |
+| `GET` | `/admin/v1/products/list-products` | Product list |
+| `POST` | `/admin/v1/products/add-without-photo` | Add product without photo |
+| `POST` | `/admin/v1/products/add-with-photo` | Add product with photo + AI analysis |
+| `GET` | `/admin/v1/products/:id/view` | Product details |
+| `PUT` | `/admin/v1/products/:id/edit` | Update product |
+| `PUT` | `/admin/v1/products/:id/update-with-photo` | Update with photo + AI |
+| `DELETE` | `/admin/v1/products/:id/delete` | Delete product |
+| `GET` | `/admin/v1/products/:id/photos` | Product photos |
+| `POST` | `/admin/v1/products/:id/add-photo` | Add photo |
+| `DELETE` | `/admin/v1/products/photos/delete` | Delete photo |
+| `GET` | `/admin/v1/products/:id/relations` | Product ingredient relations |
+| `POST` | `/admin/v1/products/:id/relations` | Update relations |
+| `GET` | `/admin/v1/products/:id/ingredients` | Ingredient list + selection state |
+| `POST` | `/admin/v1/products/:id/update-ingredients` | Update ingredients |
+| `GET` | `/admin/v1/ingredients/search?q=` | Search ingredients |
+| `POST` | `/admin/v1/ingredients/add` | Add ingredient |
+| `PUT` | `/admin/v1/ingredients/:id/edit` | Update ingredient |
+| `DELETE` | `/admin/v1/ingredients/:id/delete` | Delete ingredient |
+| `GET` | `/admin/v1/allergens/list-all-allergens` | Allergen list |
+| `GET` | `/admin/v1/allergens/search-allergens?q=` | Search allergens |
+| `POST` | `/admin/v1/allergens/add-allergen` | Add allergen |
+| `GET` | `/admin/v1/allergens/:id/full-info` | Allergen details |
+| `PUT` | `/admin/v1/allergens/:id/edit` | Update allergen |
+| `DELETE` | `/admin/v1/allergens/:id/delete` | Delete allergen |
+| `GET` | `/admin/v1/feedbacks/list` | Feedback submissions |
+| `GET` | `/admin/v1/feedbacks/image/:filename` | Feedback image |
 
 </details>
 
 ---
 
-## Proje yapısı
+## Project structure
 
 ```
 clearcart-docker/
-├── backend/                 # Kullanıcı API'si (:7860)
-│   ├── index.js             # Express app, auth, kullanıcı uçları
-│   ├── security.js          # JWT imzalama/doğrulama, RSA şifre çözme
-│   ├── cc-ai.py             # Barkod okuma + gömme çıkarma
-│   ├── middlewares/         # Görsel yükleme (uzantı beyaz listesi)
+├── backend/                 # User API (:7860)
+│   ├── index.js             # Express app, auth, user endpoints
+│   ├── security.js          # JWT signing/verification, RSA decryption
+│   ├── cc-ai.py             # Barcode reading + embedding extraction
+│   ├── middlewares/         # Image upload (extension whitelist)
 │   └── models/              # EfficientNet-B4 ONNX
-├── ad-b/                    # Admin API'si (:10031)
-│   ├── adm-index.js         # Katalog yönetimi + audit log
+├── ad-b/                    # Admin API (:10031)
+│   ├── adm-index.js         # Catalog management + audit log
 │   └── security.js
-├── db/01-schema.sql         # Şema — ilk açılışta otomatik uygulanır
-├── nginx/nginx.conf         # Yönlendirme + Basic Auth
+├── db/01-schema.sql         # Schema — applied automatically on first start
+├── nginx/nginx.conf         # Routing + Basic Auth
 ├── docker-compose.yml
-└── .env.example             # Ortam değişkeni şablonu
+└── .env.example             # Environment variable template
 ```
 
-### Veritabanı
+### Database
 
-Şema `db/01-schema.sql` içinde tanımlı ve PostgreSQL konteyneri **ilk kez** oluşturulurken
-`/docker-entrypoint-initdb.d/` üzerinden otomatik çalışır. Mevcut bir volume varsa
-çalışmaz — sıfırdan kurmak için `docker compose down -v && docker compose up -d`.
+The schema lives in `db/01-schema.sql` and runs automatically via
+`/docker-entrypoint-initdb.d/` when the PostgreSQL container is created for the **first**
+time. It does not run if a volume already exists — for a clean install, use
+`docker compose down -v && docker compose up -d`.
 
-Tablolar: `default_users` · `adm_users` · `products` · `ingredients` · `product_ingredients` ·
+Tables: `default_users` · `adm_users` · `products` · `ingredients` · `product_ingredients` ·
 `allergens` · `user_allergens` · `user_feedback` · `admin_audit_logs`
 
-Ayrıca `search_product(embedding, color, histogram, barcode)` fonksiyonu: barkod okunduysa
-kesin eşleşme, değilse gömme vektörü kosinüs benzerliğini renk ve histogramla ağırlıklı
-birleştirerek en yakın 5 ürünü döndürür.
+There is also a `search_product(embedding, color, histogram, barcode)` function: if a barcode
+was read it returns an exact match, otherwise it combines the embedding's cosine similarity
+with color and histogram scores in a weighted fashion and returns the 5 closest products.
 
 ---
 
-## Geliştirme
+## Development
 
 ```bash
-# Yerel çalıştırma
+# Running locally
 cd backend && npm install && npm start     # :7860
 cd ad-b && npm install && npm start        # :10031
 
-# Veritabanı kabuğu
+# Database shell
 docker exec -it clearcart-db psql -U postgres -d clearcart
 
-# AI script'ini tek başına test et
+# Test the AI script on its own
 cd backend && python3 cc-ai.py path/to/image.jpg
 
-# Loglar
+# Logs
 docker compose logs -f backend
 ```
 
-### Veritabanı yedekleme / taşıma
+### Database backup / migration
 
 ```bash
 ./migration.sh      # Linux/Mac: restore
-./migration.ps1     # Windows: yedek alma ve paketleme
+./migration.ps1     # Windows: dump and package
 ```
 
-> ⚠️ Üretilen `.sql` dosyaları kişisel veri içerir (e-posta, telefon, şifre hash'leri, token'lar).
-> `.gitignore` bunları hariç tutar — asla commit etmeyin.
+> ⚠️ The generated `.sql` files contain personal data (e-mail addresses, phone numbers,
+> password hashes, tokens). `.gitignore` excludes them — never commit them.
 
 ---
 
-## Güvenlik
+## Security
 
-Ayrıntı ve zafiyet bildirimi için **[SECURITY.md](SECURITY.md)**.
+See **[SECURITY.md](SECURITY.md)** for the details and for reporting vulnerabilities.
 
-- JWT'ler **RS256** ile imzalanır; anahtarlar imaj build'inde üretilir, repoya girmez.
-- Kullanıcı ve admin servisleri **ayrı anahtar çiftleri** kullanır — `backend/keys` dizinini
-  admin servisine mount etmeyin, aksi halde sıradan bir kullanıcı token'ı admin uçlarında da
-  geçerli imzaya sahip olur.
-- `/admin/v1` altındaki **tüm** uçlar router seviyesinde yetkilendirmeden geçer; yeni bir uç
-  eklendiğinde koruma unutulamaz.
-- Yüklenen dosyaların uzantısı beyaz listeye karşı doğrulanır, adları sunucuda üretilir,
-  hedef yolun izin verilen dizinde kaldığı ayrıca doğrulanır.
-- Kimlik doğrulama uçlarında oran sınırlama; giriş yanıtları kullanıcı numaralandırmasına kapalı.
-- Gizli değerler yalnızca `.env` içinde tutulur.
+- JWTs are signed with **RS256**; the keys are generated at image build time and never enter
+  the repository.
+- The user and admin services use **separate key pairs** — do not mount the `backend/keys`
+  directory into the admin service, otherwise an ordinary user token would carry a valid
+  signature on the admin endpoints too.
+- **Every** endpoint under `/admin/v1` passes through router-level authorization, so
+  protection can't be forgotten when a new endpoint is added.
+- Uploaded file extensions are validated against a whitelist, filenames are generated on the
+  server, and the resolved target path is additionally verified to stay inside the allowed
+  directory.
+- Rate limiting on the authentication endpoints; sign-in responses are closed to user
+  enumeration.
+- Secrets are kept in `.env` only.
 
-## Bilinen sınırlar
+## Known limitations
 
-- TLS sonlandırması bu depoda yoktur; üretimde önüne HTTPS yapan bir katman koyun.
-- Token iptali uygulanmamıştır: JWT'ler süreleri dolana kadar geçerlidir.
-- `computeEmbeddingsAndBuildIndex.js` ve `buildIndex.js` eski Turso/libSQL bağlantısını kullanır
-  ve aktif PostgreSQL veritabanıyla çalışmaz.
+- TLS termination is not part of this repository; put an HTTPS-terminating layer in front of
+  it in production.
+- Token revocation is not implemented: JWTs stay valid until they expire.
+- `computeEmbeddingsAndBuildIndex.js` and `buildIndex.js` use the legacy Turso/libSQL
+  connection and do not work with the active PostgreSQL database.
 
-## Lisans
+## License
 
 [PolyForm Noncommercial License 1.0.0](LICENSE) © 2026 A. Talha Yaman
