@@ -418,7 +418,7 @@ app.patch('/refresh-token', authenticateToken, async (req, res) => {
     console.error('❌ Token yenileme hatası:', err);
     return res
       .status(500)
-      .json({ success: false, message: 'Sunucu hatası', error: err.message });
+      .json({ success: false, message: 'Sunucu hatası' });
   }
 });
 
