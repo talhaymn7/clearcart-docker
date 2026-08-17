@@ -324,3 +324,8 @@ See **[SECURITY.md](SECURITY.md)** for the details and for reporting vulnerabili
 ## License
 
 [PolyForm Noncommercial License 1.0.0](LICENSE) © 2026 A. Talha Yaman
+
+You may read, study, modify and share this software for **noncommercial purposes** —
+personal projects, learning, research, and use by charitable, educational or government
+organizations. **Any commercial use requires a separate license.** If you would like to use
+Clear Cart commercially, please get in touch.
